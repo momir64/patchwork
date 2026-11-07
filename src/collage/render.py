@@ -195,6 +195,18 @@ def render(paths, layout: Layout, bg=(0, 0, 0), progress=None) -> Image.Image:
     return canvas
 
 
+def render_region(paths, layout: Layout, box, bg=(0, 0, 0)) -> Image.Image:
+    """Just the part of a (scaled) layout inside box = (x, y, w, h): what a zoomed-in preview needs at full detail."""
+    x, y, w, h = box
+    canvas = Image.new("RGB", (w, h), bg)
+    keep = layout.fit == "keep"
+    cells = [c for c in layout.cells if c.x < x + w and c.x + c.w > x and c.y < y + h and c.y + c.h > y]
+    with ThreadPoolExecutor(min(8, os.cpu_count() or 4)) as ex:
+        for c, img, off in ex.map(lambda c: (c, *_fitted(paths[c.index], c.w, c.h, keep)), cells):
+            canvas.paste(img, (c.x + off[0] - x, c.y + off[1] - y))
+    return canvas
+
+
 def save(img: Image.Image, name: str, o: Options):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ext = "png" if o.fmt == "PNG" else "jpg"

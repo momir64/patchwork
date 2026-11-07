@@ -34,9 +34,10 @@ def spin(lo, hi, val, suffix="", special=None):
 
 class PreviewArea(QWidget):
     """The collage preview. Fits the space at first; scroll to zoom towards the cursor, drag to move, double-click to
-    jump between "fit" and actual size. (The preview is rendered at PREVIEW_WIDTH, so far zooms get soft: that is
-    what Save renders at full size is for.)"""
+    jump between "fit" and actual size. The preview itself is small (PREVIEW_WIDTH); once you zoom past it, the part
+    you are looking at is rendered again from the full-size layout, so it is as sharp as the saved image will be."""
     MAX_ZOOM = 16.0
+    detail_wanted = Signal(object, float, int)       # region (in preview pixels), render pixels per preview pixel, generation
 
     def __init__(self):
         super().__init__()
@@ -46,12 +47,19 @@ class PreviewArea(QWidget):
         self.pix, self.text = None, ""
         self.zoom, self.cx, self.cy = 1.0, 0.5, 0.5          # zoom 1 = fits the area; (cx, cy) = image point shown in the middle
         self._drag = None
+        self.src, self.gen, self.detail = None, 0, None      # src = (paths, full-size layout, background); detail = (image, region)
+        self.dtimer = QTimer(self, singleShot=True, interval=180)
+        self.dtimer.timeout.connect(self._want_detail)
         self.setToolTip("Scroll to zoom, drag to move, double-click to reset")
 
     # ---- content
-    def show_pixmap(self, pm):
+    def show_pixmap(self, pm, src=None):
         first = self.pix is None
         self.pix, self.text = pm, ""
+        if src is not None:
+            self.src, self.detail = src, None
+            self.gen += 1
+            self._schedule()
         if first:
             self.zoom, self.cx, self.cy = 1.0, 0.5, 0.5       # a new preview of the same collage keeps your view
         self._clamp()
@@ -59,8 +67,39 @@ class PreviewArea(QWidget):
         self.update()
 
     def show_text(self, text):
-        self.pix, self.text = None, text
+        self.pix, self.text, self.detail = None, text, None
         self.update()
+
+    # ---- sharp detail while zoomed in
+    def _schedule(self):
+        if self.src and self.pix:
+            self.dtimer.start()
+
+    def _want_detail(self):
+        if not (self.src and self.pix):
+            return
+        layout = self.src[1]
+        sc = self._scale()
+        f = layout.width / self.pix.width()                    # full-size pixels per preview pixel
+        s = min(f, sc * self.devicePixelRatioF())              # no point rendering finer than the screen or the saved image
+        if s < 1.15:
+            return
+        ox, oy = self._origin()
+        m = 0.25                                               # a margin around the view, so small drags stay sharp
+        x0, y0 = max(0.0, -ox / sc - self.width() * m / sc), max(0.0, -oy / sc - self.height() * m / sc)
+        x1 = min(float(self.pix.width()), (self.width() - ox) / sc + self.width() * m / sc)
+        y1 = min(float(self.pix.height()), (self.height() - oy) / sc + self.height() * m / sc)
+        if x1 <= x0 or y1 <= y0:
+            return
+        side = max((x1 - x0) * s, (y1 - y0) * s)
+        if side > 3200:
+            s *= 3200 / side
+        self.detail_wanted.emit(QRectF(x0, y0, x1 - x0, y1 - y0), s, self.gen)
+
+    def show_detail(self, img, region, gen):
+        if gen == self.gen and self.pix:
+            self.detail = (QPixmap.fromImage(img), region)
+            self.update()
 
     # ---- geometry
     def _fit_scale(self):
@@ -101,6 +140,7 @@ class PreviewArea(QWidget):
         self._clamp()
         self._cursor()
         self.update()
+        self._schedule()
 
     # ---- events
     def wheelEvent(self, e):
@@ -122,6 +162,7 @@ class PreviewArea(QWidget):
             self.cy -= d.y() / (self.pix.height() * sc)
             self._clamp()
             self.update()
+            self._schedule()
 
     def mouseReleaseEvent(self, e):
         self._drag = None
@@ -146,6 +187,7 @@ class PreviewArea(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._clamp()
+        self._schedule()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -157,6 +199,9 @@ class PreviewArea(QWidget):
         sc = self._scale()
         ox, oy = self._origin()
         p.drawPixmap(QRectF(ox, oy, self.pix.width() * sc, self.pix.height() * sc), self.pix, QRectF(self.pix.rect()))
+        if self.detail and sc > 1.0:                             # the sharp patch on top
+            img, r = self.detail
+            p.drawPixmap(QRectF(ox + r.x() * sc, oy + r.y() * sc, r.width() * sc, r.height() * sc), img, QRectF(img.rect()))
         if self.zoom > 1.0001:                                   # small badge so you know you are zoomed
             txt = f"{round(100 * sc)}%"
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -170,6 +215,8 @@ class PreviewArea(QWidget):
 
 class CollagePage(QWidget):
     log = Signal(str)
+    loading = Signal(int, int)       # building a collage: progress for the sidebar's loading line
+    loaded = Signal()
 
     def __init__(self, state):
         super().__init__()
@@ -178,6 +225,7 @@ class CollagePage(QWidget):
         self.running, self.rerun, self.jobs = None, False, []
         self.timer = QTimer(self, singleShot=True, interval=400)
         self.timer.timeout.connect(self.start_preview)
+        self.detail_job, self.detail_next = None, None
 
         # ------------------------------------------------ controls
         self.source = QComboBox()
@@ -298,6 +346,7 @@ class CollagePage(QWidget):
         head.addWidget(self.summary)
         head.addStretch()
         self.preview = PreviewArea()
+        self.preview.detail_wanted.connect(self.render_detail)
         frame = QWidget()
         frame.setObjectName("card")
         frame.setStyleSheet(f"QWidget#card {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 12px; }}")
@@ -312,9 +361,6 @@ class CollagePage(QWidget):
 
         # ------------------------------------------------ footer
         self.info = label("", "muted")
-        self.progress = ProgressLine()
-        self.progress.setFixedWidth(160)
-        self.progress.hide()
         self.open_btn = button("Output folder", "folder", "ghost")
         self.open_btn.clicked.connect(lambda: os.startfile(OUTPUT_DIR))
         self.make = button("Generate collage", "download", "primary")
@@ -325,7 +371,6 @@ class CollagePage(QWidget):
         fh.setContentsMargins(24, 12, 24, 12)
         fh.setSpacing(12)
         fh.addWidget(self.info, 1)
-        fh.addWidget(self.progress)
         fh.addWidget(self.open_btn)
         fh.addWidget(self.make)
 
@@ -525,21 +570,47 @@ class CollagePage(QWidget):
             progress(0, 1)
             paths, layout = self._prepare(pool, o)
             small = layout.scaled(min(1.0, PREVIEW_WIDTH / layout.width))
-            return layout, pil_to_qimage(render.render(paths, small, o.bg, progress))
+            return layout, pil_to_qimage(render.render(paths, small, o.bg, progress)), (paths, layout, o.bg)
 
         self._run(work, self.preview_done, self.preview.show_text, lambda a, b: self.info.setText(f"Building preview... {100 * a // max(1, b)}%"))
         self.info.setText("Building preview... 0%")
 
     def preview_done(self, res):
-        layout, qimg = res
-        self.preview.show_pixmap(QPixmap.fromImage(qimg))
+        layout, qimg, src = res
+        self.preview.show_pixmap(QPixmap.fromImage(qimg), src)
         crop = f"  ·  crop up to {layout.spread:.1%}" if layout.spread else ""
         self.info.setText(f"{len(layout.cells)} items  ·  {layout.rows} rows  ·  {layout.width} × {layout.height}px  ·  ratio {layout.width / layout.height:.2f}{crop}")
+
+    def render_detail(self, region, s, gen):
+        """Re-render the zoomed-in part of the preview from the full-size layout (one at a time, newest request wins)."""
+        if self.detail_job:
+            self.detail_next = (region, s, gen)
+            return
+        paths, layout, bg = self.preview.src
+        f = self.preview.pix.width() / layout.width                  # preview pixels per full-size pixel
+        scaled = layout.scaled(s * f)                                # render pixels per full-size pixel
+        box = (round(region.x() * s), round(region.y() * s), max(1, round(region.width() * s)), max(1, round(region.height() * s)))
+        job = Job(lambda _p: pil_to_qimage(render.render_region(paths, scaled, box, bg)))
+        self.detail_job = job
+
+        def finish():
+            self.detail_job = None
+            nxt, self.detail_next = self.detail_next, None
+            if nxt and nxt[2] == self.preview.gen:
+                self.render_detail(*nxt)
+
+        job.done.connect(lambda img: self.preview.show_detail(img, region, gen))
+        job.finished.connect(finish)
+        job.finished.connect(job.deleteLater)
+        job.start()
 
     def _run(self, fn, ok, bad, progress=None):
         job = Job(fn)
         self.running = job
         self.jobs.append(job)
+
+        def moved(a, b):                                  # drives the sidebar's loading line
+            self.loading.emit(a, b if a else 0)           # still at 0%: the sliding "running" segment instead of an empty bar
 
         def finish():
             self.running = None
@@ -548,12 +619,16 @@ class CollagePage(QWidget):
             if self.rerun:
                 self.rerun = False
                 self.timer.start()
+            else:
+                self.loaded.emit()
 
         job.done.connect(ok)
         job.failed.connect(bad)
+        job.progress.connect(moved)
         if progress:
             job.progress.connect(progress)
         job.finished.connect(finish)
+        moved(0, 0)
         job.start()
 
     def generate(self):
@@ -570,26 +645,21 @@ class CollagePage(QWidget):
 
         def done(res):
             path, layout = res
-            self.progress.hide()
             self.make.setEnabled(True)
             self.info.setText(f"Saved {path.name}  ({layout.width} × {layout.height})")
             self.log.emit(f"Collage saved: {path}")
             os.startfile(path)
 
         def bad(msg):
-            self.progress.hide()
             self.make.setEnabled(True)
             self.info.setText("Failed: " + msg)
 
         def prog(a, b):
-            self.progress.setRange(0, b)
-            self.progress.setValue(a)
             self.info.setText(f"Rendering full size... {100 * a // max(1, b)}%")
 
         if self.running:
             self.info.setText("Wait for the preview to finish, then try again.")
             return
         self.make.setEnabled(False)
-        self.progress.show()
         self.info.setText("Rendering full size... 0%")
         self._run(work, done, bad, prog)

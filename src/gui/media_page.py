@@ -366,7 +366,7 @@ class MediaPage(QWidget):
         self.state, self.kind, self.group = state, kind, group
         self.cat = kind or group[0]                     # the category (shows / movies / albums) of everything on this page
         self.lib = state.libs[self.cat]
-        self.sel, self.last_row = set(), None
+        self.sel, self.last_row, self.last_on = set(), None, True
         self._sel_now, self._sel_history, self._sel_redo = frozenset(), [], []        # for Ctrl+Z
         self.model = ItemModel(state)
         self.model.sel = self.sel
@@ -763,10 +763,16 @@ class MediaPage(QWidget):
         row, item = idx.row(), (idx.data(ROLE_KIND), idx.data(ROLE_LABEL))
         if mods & Qt.KeyboardModifier.ShiftModifier and self.last_row is not None:
             a, b = sorted((self.last_row, row))
-            self.sel.update(self.model.items[a:b + 1])
+            span = set(self.model.items[a:b + 1])
+            if self.last_on:                                  # the range follows what the last plain click did
+                self.sel |= span
+            else:
+                self.sel -= span
+                if self.mode.value == "sel":
+                    self.refresh()
         else:
             self.sel.symmetric_difference_update({item})
-            self.last_row = row
+            self.last_row, self.last_on = row, item in self.sel
         self.model.touch_all()
         self.update_bar()
 

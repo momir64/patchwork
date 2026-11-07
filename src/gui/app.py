@@ -70,6 +70,8 @@ class MainWindow(QMainWindow):
             self._add_media_page(kind, MediaPage(self.state, kind=kind, lazy=True))
         self.collage = CollagePage(self.state)
         self.collage.log.connect(self.add_log)
+        self.collage.loading.connect(lambda a, b: None if self.sync_job else self.sidebar.set_progress(a, b))
+        self.collage.loaded.connect(lambda: None if (self.sync_job or self.sidebar.syncing) else self.sidebar.progress.hide())
         self._register("collage", self.collage)
 
         # ---- sidebar (libraries + groups, collage / sync / settings / log at the bottom)
