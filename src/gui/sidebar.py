@@ -286,12 +286,13 @@ class Sidebar(QWidget):
         if it:
             it.setChecked(True)
 
-    def set_syncing(self, busy, cancelling=False):
+    def set_syncing(self, busy, cancelling=False, text="Syncing..."):
         self.syncing = busy
+        self.busy_text = text
         self.sync_btn.setEnabled(not busy)
         self.opts_btn.setEnabled(not busy)
         if not self.compact:
-            self.sync_btn.setText("Syncing..." if busy else "Sync")
+            self.sync_btn.setText(text if busy else "Sync")
         if not busy:
             self.progress.hide()
 
@@ -305,7 +306,7 @@ class Sidebar(QWidget):
         self.setFixedWidth(self.NARROW if compact else self.WIDE)
         for w in (self.sec_lib, self.opts_btn):
             w.setVisible(not compact)
-        self.sync_btn.setText("" if compact else ("Syncing..." if self.syncing else "Sync"))
+        self.sync_btn.setText("" if compact else (getattr(self, "busy_text", "Syncing...") if self.syncing else "Sync"))
         self.collage_btn.set_compact(compact)
         self.settings_btn.setText("" if compact else "Settings")
         self.log_btn.setText("" if compact else "Log")

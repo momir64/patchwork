@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self.page_for = {}                              # nav key -> widget
         self._stale = set()                             # media pages that need a reload before they are shown
         for kind in KINDS:
-            self._add_media_page(kind, MediaPage(self.state, kind=kind))
+            self._add_media_page(kind, MediaPage(self.state, kind=kind, lazy=True))
         self.collage = CollagePage(self.state)
         self.collage.log.connect(self.add_log)
         self._register("collage", self.collage)
@@ -120,6 +120,8 @@ class MainWindow(QMainWindow):
         page.cancel_sync.connect(self.cancel_sync)
         page.set_syncing(bool(self.sync_job))
         self._register(key, page)
+        if getattr(page, "lazy", False):
+            self._stale.add(page)                       # filled in when you first open it
 
     def go(self, key, picks=True):
         page = self.page_for.get(key)
@@ -132,6 +134,10 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentWidget(page)
         self.sidebar.set_current(key)
         self.current_key = key
+        tab = getattr(self.state, "tab", "all")
+        if isinstance(page, MediaPage) and page.mode.value != tab:      # the All / Favorites / ... tab follows you between pages
+            page.mode.set_value(tab, emit=False)
+            self._stale.add(page)
         if page in self._stale:                       # reloaded lazily: only the page you look at pays for a change
             self._stale.discard(page)
             page.reload()
@@ -174,7 +180,7 @@ class MainWindow(QMainWindow):
                 else:
                     self._stale.add(pg)
                 continue
-            page = MediaPage(self.state, group=key)
+            page = MediaPage(self.state, group=key, lazy=True)
             page.group_deleted.connect(self.group_removed)
             page.group_renamed.connect(self.group_renamed)
             self._add_media_page(f"group:{key[0]}:{key[1]}", page)
@@ -252,6 +258,13 @@ class MainWindow(QMainWindow):
         for p in self.all_media_pages():
             p.set_status(text)
 
+    def show_status(self, text):
+        """Only the bottom status row (not the log): progress of things that are not a sync."""
+        self.last_status = text
+        if not self.sync_job:
+            for p in self.all_media_pages():
+                p.set_status(text)
+
     # ------------------------------------------------------------ sync
     def sync_options(self):
         dlg = SyncDialog(self.state.cfg, self.state.pref("sync", DEFAULT_SYNC), self)
@@ -313,7 +326,18 @@ class MainWindow(QMainWindow):
         for p in self.all_media_pages():
             p.set_status(text)
 
+    def _import_busy(self, on, dlg):
+        """A Spotify import is running: same loading line and cancel button as a sync."""
+        self.sidebar.set_syncing(on or bool(self.sync_job), text="Importing..." if on else "Syncing...")
+        if not self.sync_job:
+            for p in self.all_media_pages():
+                p.set_syncing(on)
+
     def cancel_sync(self):
+        dlg = getattr(self, "settings_dialog", None)
+        if not self.sync_cancel and dlg is not None and getattr(dlg, "importing", False):
+            dlg.cancel_import()
+            return
         if self.sync_cancel:
             self.sync_cancel.set()
             self.sync_stage, self._pct = "Cancelling", -1
@@ -323,8 +347,13 @@ class MainWindow(QMainWindow):
 
     def sync_finished(self, text):
         self.state.reload()
+        shown = self.page_for.get(self.current_key)
         for p in self.all_media_pages():
-            p.reload()
+            if p is shown:
+                p.reload()
+                self._stale.discard(p)
+            else:
+                self._stale.add(p)                      # reloaded when you open it
         self.rebuild_groups()
         self.update_counts()
         self.sidebar.set_syncing(False)
@@ -339,6 +368,10 @@ class MainWindow(QMainWindow):
             self.settings_dialog.activateWindow()
             return
         dlg = self.settings_dialog = SettingsDialog(self.state.cfg, self)
+        dlg.note.connect(self.add_log)
+        dlg.status.connect(self.show_status)
+        dlg.progress.connect(self.sidebar.set_progress)
+        dlg.busy.connect(lambda on: self._import_busy(on, dlg))
 
         def closed(result):
             self.settings_dialog = None

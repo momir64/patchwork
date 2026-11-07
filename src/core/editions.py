@@ -145,6 +145,9 @@ def groups(labels, kind="albums", lib=None) -> list:
                 if known.get(key):
                     ids[(key, str(known[key]))].append(l)
         extra += [v for v in ids.values() if len(v) > 1]
+        if kind == "albums":
+            from . import covers
+            extra += covers.similar(lib, labels)            # same artist, same-looking cover
         found = _join(found, [g for g in extra if len(g) > 1])
     rules = {r["set"]: {norm_key(x) for x in r["apart"]} for r in _dup_state(kind)["apart"]}
     if rules:

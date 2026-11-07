@@ -1,10 +1,165 @@
 """Small reusable widgets: wrapping layout, buttons with icons, segmented control, section headers."""
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QSizePolicy, QSpinBox,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox,
                                QSpacerItem, QVBoxLayout, QWidget)
 
 from . import icons, theme
+
+
+class SearchCombo(QComboBox):
+    """A dropdown you search in place: click it and the field itself turns into the search box (the current choice shows as a
+    dim hint), the list below narrows to the entries containing what you type. Up / Down move, Enter or a click picks, Esc or
+    clicking elsewhere cancels. When closed it is a normal dropdown: the text can not be selected or edited."""
+
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setCompleter(None)
+        le = self.lineEdit()
+        le.setReadOnly(True)
+        le.setCursor(Qt.CursorShape.ArrowCursor)
+        le.setStyleSheet(f"QLineEdit {{ background: transparent; border: none; padding: 0; selection-background-color: transparent; "
+                         f"selection-color: {theme.TEXT}; }}")
+        le.installEventFilter(self)
+        le.textChanged.connect(self._filter)
+        self._pop = self._list = None
+
+    def refit(self):
+        """Make the box wide enough for its widest entry, so the box and the list that opens from it are the same width."""
+        fm = self.fontMetrics()
+        widest = max((fm.horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        self.setMinimumWidth(max(140, widest + 12 + 8 + 28 + 14 + 8))      # text padding, drop-down arrow, scroll bar in the list, air
+
+    # ---- the search state
+    def _searching(self):
+        return self._pop is not None
+
+    def showPopup(self):
+        if self._searching():
+            return
+        le = self.lineEdit()
+        pop = QFrame(self.window(), Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        pop.setObjectName("searchpop")
+        pop.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        pop.setStyleSheet(f"QFrame#searchpop {{ background: {theme.SURFACE2}; border: 1px solid #333a50; border-radius: {theme.RADIUS}px; }}"
+                          f"QListWidget {{ background: transparent; border: none; outline: 0; }}"
+                          f"QListWidget::item {{ min-height: 26px; padding: 0 8px; border-radius: 5px; color: {theme.TEXT}; }}"
+                          f"QListWidget::item:selected {{ background: {theme.ACCENT_SOFT}; }}"
+                          f"QListWidget::item:hover {{ background: #232839; }}")
+        v = QVBoxLayout(pop)
+        v.setContentsMargins(4, 4, 4, 4)
+        lst = QListWidget()
+        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lst.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for i in range(self.count()):
+            it = QListWidgetItem(self.itemText(i))
+            it.setData(Qt.ItemDataRole.UserRole, i)
+            lst.addItem(it)
+        v.addWidget(lst)
+        lst.itemClicked.connect(self._pick)
+        self._pop, self._list, self._shown_text = pop, lst, self.currentText()
+        le.setReadOnly(False)
+        le.setPlaceholderText(self._shown_text)
+        le.clear()
+        lst.setCurrentRow(max(0, self.currentIndex()))
+        self._place()
+        pop.show()
+        le.setFocus()
+        lst.scrollToItem(lst.currentItem())
+        QApplication.instance().installEventFilter(self)
+
+    def _place(self):
+        """Size the list from what is really in it: the row height Qt reports, the widest entry, and the visible row count."""
+        lst = self._list
+        shown = sum(not lst.item(r).isHidden() for r in range(lst.count()))
+        row = max(26, lst.sizeHintForRow(0))
+        rows = max(1, min(shown, 9))
+        screen = self.screen().availableGeometry()
+        w = min(self.width(), screen.width() - 20)                # the list is exactly as wide as the box (the box fits its widest entry)
+        h = rows * row + 2 * lst.frameWidth() + 8 + 2 + 2
+        self._pop.setFixedSize(w, h)
+        pos = self.mapToGlobal(QPoint(0, self.height() + 2))
+        if pos.x() + w > screen.right():
+            pos.setX(screen.right() - w - 4)
+        if pos.y() + h > screen.bottom():
+            pos = self.mapToGlobal(QPoint(0, -h - 2))
+            pos.setX(min(pos.x(), screen.right() - w - 4))
+        self._pop.move(pos)
+
+    def _filter(self, text):
+        if not self._searching():
+            return
+        t = text.strip().casefold()
+        lst = self._list
+        for r in range(lst.count()):
+            lst.item(r).setHidden(bool(t) and t not in lst.item(r).text().casefold())
+        for r in range(lst.count()):
+            if not lst.item(r).isHidden():
+                lst.setCurrentRow(r)
+                break
+        self._place()
+
+    def _pick(self, item=None):
+        item = item or self._list.currentItem()
+        if item is None or item.isHidden():
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        self._close()
+        self.setCurrentIndex(idx)
+
+    def _close(self):
+        if not self._searching():
+            return
+        QApplication.instance().removeEventFilter(self)
+        pop, self._pop, self._list = self._pop, None, None
+        pop.close()
+        pop.deleteLater()
+        le = self.lineEdit()
+        le.setReadOnly(True)
+        le.setPlaceholderText("")
+        le.setText(self.itemText(self.currentIndex()))
+        le.deselect()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        le = self.lineEdit()
+        if obj is le:
+            if t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+                if self._searching():
+                    self._close()
+                else:
+                    self.showPopup()
+                return True
+            if t in (QEvent.Type.MouseButtonRelease, QEvent.Type.MouseMove) and not self._searching():
+                return True                                                 # no dragging a text selection
+            if t == QEvent.Type.FocusOut and self._searching() and ev.reason() != Qt.FocusReason.PopupFocusReason:
+                self._close()
+            if t == QEvent.Type.KeyPress and self._searching():
+                k = ev.key()
+                if k in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    step, r, lst = (1 if k == Qt.Key.Key_Down else -1), self._list.currentRow(), self._list
+                    while 0 <= r + step < lst.count():
+                        r += step
+                        if not lst.item(r).isHidden():
+                            lst.setCurrentRow(r)
+                            break
+                    return True
+                if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._pick()
+                    return True
+                if k == Qt.Key.Key_Escape:
+                    self._close()
+                    return True
+        elif t == QEvent.Type.MouseButtonPress and self._searching():       # a click anywhere else cancels the search
+            w = obj if isinstance(obj, QWidget) else None
+            if w is not None and not (self._pop.isAncestorOf(w) or w is self._pop or self.isAncestorOf(w) or w is self):
+                self._close()
+        return super().eventFilter(obj, ev)
+
+    def hidePopup(self):
+        pass
 
 
 class FlowLayout(QLayout):

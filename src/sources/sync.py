@@ -167,7 +167,8 @@ class Sync:
             if kind not in self.kinds:
                 continue
             lib.index_posters()
-            jobs += [(kind, lib, label, known[kind].get(norm_key(label))) for label in lib.missing_posters()]
+            jobs += [(kind, lib, label, known[kind].get(norm_key(label))) for label in lib.missing_posters()
+                     if not (kind == "albums" and lib.meta.get(label).get("cover_tried") and not known[kind].get(norm_key(label)))]   # misses are not retried every sync
         if not jobs:
             return
         self.log(f"Fetching {len(jobs)} missing posters...")
@@ -178,8 +179,11 @@ class Sync:
             got = download_image(e.poster, e.poster_headers) if e and e.poster else None
             if not got and kind == "albums":                     # e.g. Spotify imports carry no picture
                 m = lib.meta.get(label)
-                url = covers.album_cover(self.cfg, (m.get("creators") or [""])[0], m.get("title") or "") if m.get("creators") else None
-                got = download_image(url) if url else None
+                if m.get("creators"):
+                    for url in covers.album_cover_urls(self.cfg, m["creators"][0], m.get("title") or ""):
+                        got = download_image(url)               # a source can know the album and still hand out a dead link
+                        if got:
+                            break
             tid = None
             if not got and key and kind != "albums":
                 url, tid = tmdb.poster_url(key, kind, label, (e.tmdb_id if e else None) or lib.meta.get(label).get("ids", {}).get("tmdb"))
@@ -194,6 +198,8 @@ class Sync:
                 lib.set_poster(label, got[0], got[1])
                 ok += 1
             else:
+                if kind == "albums":
+                    lib.meta.update(label, {"cover_tried": True})
                 self.log(f"  no poster found: {label}")
         self.summary.append(f"posters: {ok}/{len(jobs)}")
         self.log(f"Posters downloaded: {ok}/{len(jobs)}")
@@ -230,11 +236,11 @@ class Sync:
                 continue
             artist = m["creators"][0]
             if m.get("mb_checked") and not self.force_meta:
-                known.setdefault(artist, m)           # this artist was already looked up (via another album)
+                known.setdefault(norm_key(artist), m)           # this artist was already looked up (via another album)
             else:
                 need.setdefault(artist, []).append(label)
-        for artist in [a for a in need if a in known]:        # a new album of an artist we already have: copy, no request
-            src = known[artist]
+        for artist in [a for a in need if norm_key(a) in known]:        # a new album of an artist we already have: copy, no request
+            src = known[norm_key(artist)]
             info = {k: src[k] for k in ("genres", "countries", "languages", "mb_checked") if src.get(k)}
             if src.get("ids", {}).get("artist_mbid"):
                 info["ids"] = {"artist_mbid": src["ids"]["artist_mbid"]}

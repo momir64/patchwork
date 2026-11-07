@@ -1,9 +1,10 @@
 """Helpers for turning titles into file names and into comparable keys."""
+import hashlib
 import re
 import unicodedata
 from functools import lru_cache
 
-_BAD_CHARS = re.compile(r'[<>"/\|?*\x00-\x1f]')
+_BAD_CHARS = re.compile(r'[<>"/\\|?*\x00-\x1f]')           # includes the backslash, which would otherwise start a sub-folder
 
 
 def safe_filename(label: str) -> str:
@@ -11,6 +12,8 @@ def safe_filename(label: str) -> str:
     s = label.replace(":", " -")
     s = _BAD_CHARS.sub("-", s)
     s = re.sub(r"\s+", " ", s).strip(" .")
+    if len(s) > 110:                                           # Windows refuses very long paths: shorten, keep it unique
+        s = s[:100].rstrip(" .") + "~" + hashlib.md5(label.encode("utf-8")).hexdigest()[:8]
     return s or "_"
 
 

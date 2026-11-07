@@ -5,16 +5,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QAbstractListModel, QTimer, QModelIndex, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView,
                                QMenu, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedLayout, QStyle, QStyledItemDelegate,
                                QVBoxLayout, QWidget)
 
-from ..core import editions
+from ..core import covers, editions
 from ..core.library import title_from_label
-from ..core.names import norm_key, safe_filename
+from ..core.names import norm_key, safe_filename, sort_key
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
-from .widgets import Btn, FlowLayout, SearchBox, Segmented, StatusLabel, button, label
+from .widgets import Btn, FlowLayout, SearchCombo, SearchBox, Segmented, StatusLabel, button, label
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_LABEL = ROLE_KIND + 1
@@ -34,7 +34,7 @@ def display_sub(lib, label):
     m = lib.meta.get(label)
     if lib.kind == "albums":
         return (m.get("creators") or [""])[0]
-    bits = [str(m["year"]) if m.get("year") else "", (m.get("genres") or [""])[0]]
+    bits = [str(m["year"]) if m.get("year") else "", (lib.meta.values(label, "genre") or [""])[0]]
     return "  ·  ".join(b for b in bits if b)
 
 
@@ -43,7 +43,7 @@ def tooltip(lib, label):
     lines = [f"<b>{display_title(lib, label)}</b>"]
     for key, name in (("year", "Year"), ("genres", "Genres"), ("countries", "Countries"), ("languages", "Languages"),
                       ("creators", {"albums": "Artist", "movies": "Director"}.get(lib.kind, "Creators")), ("studio", "Studio")):
-        v = m.get(key)
+        v = lib.meta.values(label, "genre") if (key == "genres" and lib.kind == "albums") else m.get(key)
         if v:
             lines.append(f"<span style='color:{theme.MUTED}'>{name}:</span> {', '.join(v) if isinstance(v, list) else v}")
     try:
@@ -133,10 +133,11 @@ def two_lines(fm, text, w):
 
 
 SORTS = {
-    "video": (("Title A–Z", "az"), ("Title Z–A", "za"), ("Newest first", "year_new"), ("Oldest first", "year_old"),
-              ("Highest rated", "rating"), ("Favorites first", "favs")),
+    "video": (("Title A–Z", "az"), ("Title Z–A", "za"), ("Released: newest", "year_new"), ("Released: oldest", "year_old"),
+              ("Highest rated", "rating"), ("Added: newest", "added_new"), ("Added: oldest", "added_old"), ("Favorites first", "favs")),
     "albums": (("Title A–Z", "az"), ("Title Z–A", "za"), ("Artist A–Z", "artist"), ("Most played", "plays_most"),
-               ("Least played", "plays_least"), ("Favorites first", "favs")),
+               ("Least played", "plays_least"), ("Added: newest", "added_new"), ("Added: oldest", "added_old"), ("Color: rainbow", "hue"), ("Color: dark to light", "bright"),
+               ("Favorites first", "favs")),
 }
 
 
@@ -360,7 +361,7 @@ class MediaPage(QWidget):
     log = Signal(str)
     cancel_sync = Signal()
 
-    def __init__(self, state, kind=None, group=None):
+    def __init__(self, state, kind=None, group=None, lazy=False):
         super().__init__()
         self.state, self.kind, self.group = state, kind, group
         self.cat = kind or group[0]                     # the category (shows / movies / albums) of everything on this page
@@ -420,6 +421,8 @@ class MediaPage(QWidget):
 
         # ------------------------------------------------ toolbar (wraps when narrow)
         self.mode = Segmented([("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden"), ("Duplicates", "dups")], "all")
+        self.mode.set_value(getattr(state, "tab", "all"), emit=False)     # the tab is shared by every page
+        self.mode.changed.connect(lambda v: setattr(state, "tab", v))
         self.mode.changed.connect(self.refresh)
         bar = QWidget()
         flow = FlowLayout(bar, 8)
@@ -433,7 +436,7 @@ class MediaPage(QWidget):
         flow.addWidget(self.sort_cb)
         self.facets = {}
         for facet in ("genre", "country", "language"):
-            cb = QComboBox()
+            cb = SearchCombo()
             cb.setMinimumWidth(140)
             cb.currentIndexChanged.connect(self.refresh)
             self.facets[facet] = cb
@@ -500,7 +503,9 @@ class MediaPage(QWidget):
         root.addLayout(body, 1)
         root.addWidget(actions)
         self.view.apply_zoom()
-        self.reload()
+        self.lazy = lazy                                  # lazy: the first reload waits until the page is shown
+        if not lazy:
+            self.reload()
 
     def _zoom_box(self):
         box = QWidget()
@@ -537,7 +542,7 @@ class MediaPage(QWidget):
         """Re-read everything (after sync, rename, group changes...)."""
         if self.group:
             self.icon_lbl.setPixmap(icons.pixmap("folder", self.state.group_color(self.cat, self.group[1]), 24))
-        self.sel &= set(self.all_items())
+        self.sel &= set(self.all_items()) | set(self.all_items(hidden=True)) | set(self.all_items(dups=True))     # gone items drop out; filtered / hidden ones stay
         self.reload_facets()
         self.refresh()
 
@@ -552,6 +557,7 @@ class MediaPage(QWidget):
                 cb.addItem(f"{name}  ({n})", name)
             cb.setCurrentIndex(max(0, cb.findData(cur)))
             cb.blockSignals(False)
+            cb.refit()
         if self.kind:
             cur = self.group_cb.currentData()
             self.group_cb.blockSignals(True)
@@ -622,6 +628,24 @@ class MediaPage(QWidget):
             return sorted(items, key=lambda it: ((meta.get(it[1]).get("creators") or ["~"])[0].casefold(), it[1].casefold()))
         if key in ("year_new", "year_old"):
             return by("year", key == "year_new")
+        if key in ("hue", "bright"):                        # by cover color; the colors are worked out in parallel once, then cached
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                covers.warm_colors(self.lib)
+            finally:
+                QApplication.restoreOverrideCursor()
+            return sorted(items, key=lambda it: covers.color_key(self.lib, it[1], key))
+        if key in ("added_new", "added_old"):
+            def added(it):                                  # when it joined the library; older items fall back to their poster's date
+                t = meta.get(it[1]).get("added")
+                if not t:
+                    p = self.lib.poster(it[1])
+                    try:
+                        t = p.stat().st_mtime if p else 0
+                    except OSError:
+                        t = 0
+                return t
+            return sorted(items, key=added, reverse=key == "added_new")
         if key == "rating":
             return by("rating", True)
         if key in ("plays_most", "plays_least"):
@@ -653,7 +677,8 @@ class MediaPage(QWidget):
 
     # ------------------------------------------------------------ action bar
     def selected(self):
-        return [m for m in self.model.items if m in self.sel] if self.sel else []
+        """Everything selected, including items the current filters / tab hide: they stay selected."""
+        return sorted(self.sel, key=lambda m: sort_key(m[1])) if self.sel else []
 
     def _label(self, btn, text, icon=None):
         btn.setText("" if self.compact else text)

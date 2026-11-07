@@ -1,24 +1,25 @@
 """Dialogs: granular Sync, Settings (.env editor + data export/import) and the activity log."""
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
                                QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
-from ..core import editions, transfer
+from ..core import covers, editions, transfer
 from ..core.library import KINDS, Library, add_alias, title_from_label
 from ..sources import Sync
 from ..core.config import ENV_PATH, KEYS
 from ..sources import test_connection
-from ..sources.sync import KINDS, SOURCES, STEPS
+from ..sources.sync import KINDS, SOURCES, STEPS, Cancelled
 from . import theme
 from .chrome import Modal, notify
 from .common import Job
 from .widgets import FlowLayout, UnitSpin, button, label
 
 
-def card(title=None, hint=None, divider=True):
+def card(title=None, hint=None, divider=True, gap=14):
     """A flat section (no box): thin divider, bold title, dim hint. Returns (widget, layout) - add rows to the layout."""
     f = QWidget()
     v = QVBoxLayout(f)
@@ -33,7 +34,7 @@ def card(title=None, hint=None, divider=True):
         head = QHBoxLayout()
         head.setSpacing(10)
         head.addWidget(label(title, "cardtitle"))
-        short = bool(hint) and len(hint) <= 40
+        short = bool(hint) and len(hint) <= 44
         if short:
             head.addWidget(label(hint, "dim"), 1)
         else:
@@ -41,7 +42,7 @@ def card(title=None, hint=None, divider=True):
         v.addLayout(head)
         if hint and not short:
             v.addWidget(label(hint, "dim", wrap=True))
-        v.addSpacing(14)                      # air between the heading and its fields
+        v.addSpacing(gap)                     # air between the heading and its fields
     return f, v
 
 
@@ -155,6 +156,10 @@ NICE = {"SONARR_URL": "Address", "SONARR_API_KEY": "API key", "SONARR_ONLY_DOWNL
 class SettingsDialog(Modal):
     """Left: list of setting groups. Right: the details of the chosen group."""
     msg = Signal(str)
+    note = Signal(str)          # a line for the activity log and the main window's status row
+    status = Signal(str)        # status row only (progress)
+    progress = Signal(int, int)  # the loading line in the sidebar
+    busy = Signal(bool)         # an import is running
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent, "Settings", 800, modal=False)
@@ -179,7 +184,7 @@ class SettingsDialog(Modal):
         self.footer("Save", "check", self.save, extra=note)
         self.nav.setCurrentRow(0)
         self.setMinimumSize(620, 440)
-        self.resize(840, 600)
+        self.resize(840, 625)
 
     def add_page(self, title, widget):
         self.nav.addItem(title)
@@ -233,7 +238,7 @@ class SettingsDialog(Modal):
         return f
 
     def spotify_page(self):
-        f, v = card("Spotify", "Import albums from your Spotify data export.", divider=False)
+        f, v = card("Spotify", "Import albums from your Spotify data export", divider=False, gap=9)
         self.sp_files = []
 
         def step(n, title):
@@ -247,7 +252,7 @@ class SettingsDialog(Modal):
             head.addWidget(badge)
             head.addWidget(label(title, "cardtitle"), 1)
             if n > 1:
-                v.addSpacing(2)
+                v.addSpacing(2 if n == 2 else -9)           # step 3 sits a few pixels closer to step 2
             v.addLayout(head)
             body = QVBoxLayout()
             body.setSpacing(8)
@@ -271,14 +276,14 @@ class SettingsDialog(Modal):
         b.addLayout(prow)
 
         b = step(2, "Choose what to import")
-        b.addWidget(label("Saved albums are always included. Optionally add the albums of:", "dim", wrap=True))
+        b.setSpacing(4)
         self.sp_liked, self.sp_play = QCheckBox("Liked songs"), QCheckBox("Playlists")
         b.addWidget(self.sp_liked)
         b.addWidget(self.sp_play)
         self.sp_min = UnitSpin("songs")
         self.sp_min.setRange(1, 50)
         self.sp_min.setValue(3)
-        self.sp_min.setFixedWidth(130)
+        self.sp_min.setFixedWidth(96)
         mrow = QHBoxLayout()
         mrow.setSpacing(10)
         self.sp_min_lbl = [label("Skip albums with fewer than", "dim"), label("in these lists", "dim")]
@@ -301,7 +306,7 @@ class SettingsDialog(Modal):
         b.addWidget(self.sp_covers)
         b.addWidget(self.sp_meta)
         b.addWidget(label("Genres and country are looked up at about 1 artist per second.", "dim", wrap=True))
-        for cb in (self.sp_liked, self.sp_play, self.sp_covers):
+        for cb in (self.sp_liked, self.sp_play, self.sp_covers, self.sp_meta):
             cb.setChecked(True)
 
         self.sp_btn = button("Import albums", "download", "primary")
@@ -312,10 +317,16 @@ class SettingsDialog(Modal):
         brow.setContentsMargins(32, 0, 0, 0)
         brow.addWidget(self.sp_btn)
         brow.addWidget(self.sp_out, 1)
-        v.addSpacing(16)
+        v.addSpacing(11)
         v.addLayout(brow)
         self.msg.connect(lambda m: self.sp_out.setText(m))
         return f
+
+    def cancel_import(self):
+        if getattr(self, "importing", False):
+            self.cancel_event.set()
+            self.sp_out.setText("Cancelling...")
+            self.status.emit("Cancelling the Spotify import...")
 
     def pick_spotify(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Spotify export files", "", "Spotify export (*.json)")
@@ -336,23 +347,50 @@ class SettingsDialog(Modal):
         opts = dict(liked=self.sp_liked.isChecked(), playlists=self.sp_play.isChecked(), min_tracks=self.sp_min.value(),
                     posters=self.sp_covers.isChecked(), metadata=self.sp_meta.isChecked())
         files, cfg = list(self.sp_files), self.cfg
+        self.cancel_event = cancel = threading.Event()
 
         def work(progress):
             libs = {k: Library(k) for k in KINDS}
-            return Sync(cfg, libs, log=lambda m: self.msg.emit(m.splitlines()[0][:110]), progress=progress).import_spotify(files, **opts)
+            sync = Sync(cfg, libs, log=lambda m: (self.msg.emit(m.splitlines()[0][:110]), self.note.emit("Spotify import: " + m.splitlines()[0])),
+                        progress=progress, cancel=cancel)
+            try:
+                return sync.import_spotify(files, **opts)
+            except Cancelled:
+                for lib in libs.values():                  # keep whatever was already imported
+                    lib.save()
+                    lib.meta.save()
+                return None
 
         job = Job(work)
         self.sp_btn.setEnabled(False)
         self.sp_out.setText("Importing...")
-        job.progress.connect(lambda a, b: self.sp_out.setText(f"{100 * a // max(1, b)}%  ·  working..."))
+        self.status.emit("Spotify import...")
+        self.importing = True
+        self.busy.emit(True)
+        self.progress.emit(0, 0)
+
+        def on_progress(a, b):
+            pct = 100 * a // max(1, b)
+            self.progress.emit(a, b)
+            self.sp_out.setText(f"{pct}%  ·  working...")
+            self.status.emit(f"Spotify import  ·  {pct}%")
+        job.progress.connect(on_progress)
 
         def finished(summary):
             self.sp_btn.setEnabled(True)
             self.imported = True
+            self.importing = False
+            if summary is None:
+                self.sp_out.setText("Cancelled")
+                self.note.emit("Spotify import cancelled (what was already imported is kept)")
+                self.busy.emit(False)
+                return
             self.sp_out.setText("Done: " + ", ".join(summary))
+            self.note.emit("Spotify import finished: " + (", ".join(summary) or "nothing to do"))
+            self.busy.emit(False)
 
         job.done.connect(finished)
-        job.failed.connect(lambda m: (self.sp_btn.setEnabled(True), self.sp_out.setText("Failed: " + m)))
+        job.failed.connect(lambda m: (setattr(self, "importing", False), self.sp_btn.setEnabled(True), self.sp_out.setText("Failed: " + m), self.note.emit("Spotify import failed: " + m), self.busy.emit(False)))
         job.finished.connect(lambda: self.jobs.remove(job))
         self.jobs.append(job)
         job.start()
@@ -644,6 +682,8 @@ class EditionSet(QWidget):
         self.name_box = None
         if name_choice:
             self.name_box = QComboBox()
+            self.name_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.name_box.setMinimumContentsLength(8)       # a long name must not stretch the card's columns apart
             for l in ordered:
                 self.name_box.addItem(l)
             if default_name:
@@ -655,11 +695,11 @@ class EditionSet(QWidget):
             nh.addWidget(label("Name:", "muted"))
             nh.addWidget(self.name_box, 1)
             grid.addWidget(nr, rows, 0, 1, cols)
-        grid.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)     # covers start at the same height in every card
         self.min_w = 2 * self.PAD + cols * EditionTile.W + (cols - 1) * self.GAP
         self.setMinimumWidth(self.min_w)
-        self.setFixedHeight(2 * self.PAD + rows * self.tiles[0].height() + (rows - 1) * self.VGAP
-                            + ((self.VGAP + self.NAME) if name_choice else 0))
+        self.natural_h = 2 * self.PAD + rows * self.tiles[0].height() + (rows - 1) * self.VGAP + ((self.VGAP + self.NAME) if name_choice else 0)
+        self.setFixedHeight(self.natural_h)
         self._sync()
 
     # ---- state
@@ -736,9 +776,11 @@ class AdaptiveGrid(QWidget):
         y = 0
         for i in range(0, len(self.cards), cols):
             row = self.cards[i:i + cols]
+            rh = max(getattr(c, "natural_h", c.height()) for c in row)
             for j, c in enumerate(row):
-                c.setGeometry(j * (cw + self.gap), y, cw, c.height())
-            y += max(c.height() for c in row) + self.gap
+                c.setFixedHeight(rh)                      # one height per row, so the covers line up across cards
+                c.setGeometry(j * (cw + self.gap), y, cw, rh)
+            y += rh + self.gap
         self.setMinimumHeight(max(0, y - self.gap))
 
 
@@ -749,6 +791,12 @@ class DuplicatesDialog(Modal):
     def __init__(self, state, kind="albums", parent=None):
         noun = NOUNS[kind]
         lib = state.libs[kind]
+        if kind == "albums":                              # hash the covers first (parallel; only new / changed ones are read)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                covers.hash_posters(lib)
+            finally:
+                QApplication.restoreOverrideCursor()
         sets = [g for g in editions.groups(lib.items, kind, lib)
                 if sum(not lib.is_hidden(l) for l in g) != 1]            # one shown, rest hidden = already resolved
         super().__init__(parent, "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s", 820 if sets else 340)
@@ -759,7 +807,7 @@ class DuplicatesDialog(Modal):
             self.body.addWidget(label(f"No duplicate {noun}s found.", "muted"))
             self.footer("Close", None, cancel_text=None)
             return
-        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once (same name, same id, or marked by you). Click a cover to keep it and hide the others, or mark one as a different " + noun + ".", "muted", wrap=True))
+        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once (same name, same id, same artist and cover, or marked by you). Click a cover to keep it and hide the others, or mark one as a different " + noun + ".", "muted", wrap=True))
         cover_h = EditionTile.W if kind == "albums" else int(EditionTile.W * 1.5)
         grid = AdaptiveGrid()
         for g in self.sets:

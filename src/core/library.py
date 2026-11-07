@@ -106,7 +106,7 @@ class Library:
         return self._keys.get(norm_key(label))
 
     def poster(self, label: str):
-        return self._posters.get(norm_key(label))
+        return self._posters.get(norm_key(label)) or self._posters.get(norm_key(safe_filename(label)))     # (very long names are stored shortened)
 
     def is_fav(self, label: str) -> bool:
         return norm_key(label) in self.favs
@@ -130,6 +130,7 @@ class Library:
             return False
         self.items.append(label)
         self._keys[norm_key(label)] = label
+        self.meta.stamp_added(label)
         return True
 
     def remove(self, label: str):

@@ -501,7 +501,16 @@ class CollagePage(QWidget):
             paths = render.arrange(paths, layout, o.direction)
         return paths, layout
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if getattr(self, "_stale_preview", False):
+            self._stale_preview = False
+            self.timer.start()
+
     def start_preview(self):
+        if not self.isVisible():                          # nobody is looking: build the preview when the page is opened
+            self._stale_preview = True
+            return
         if self.running:
             self.rerun = True
             return

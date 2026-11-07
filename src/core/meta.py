@@ -3,8 +3,10 @@
 Stored as data/<kind>/meta.json, keyed by the item's title so it is easy to read and edit by hand.
 """
 import json
+import time
 from collections import Counter
 
+from . import genres
 from .config import kind_dir
 from .names import norm_key
 
@@ -22,6 +24,19 @@ def norm_language(name):
     return LANGUAGE_ALIASES.get(str(name).strip().casefold(), str(name).strip())
 
 
+# the same country under another name (TMDB says 'United States of America', MusicBrainz 'United States')
+COUNTRY_ALIASES = {"united states of america": "United States", "usa": "United States", "us": "United States",
+                   "u.s.": "United States", "u.s.a.": "United States", "great britain": "United Kingdom", "uk": "United Kingdom"}
+
+
+def norm_country(name):
+    n = str(name).strip()
+    if len(n) <= 3 and n.isalpha() and n.upper() == n:                 # a leftover country code: 'BA' -> 'Bosnia and Herzegovina'
+        from ..sources.lookups import COUNTRIES
+        n = COUNTRIES.get(n, n)
+    return COUNTRY_ALIASES.get(n.casefold(), n)
+
+
 def as_list(v):
     if v in (None, "", []):
         return []
@@ -30,6 +45,7 @@ def as_list(v):
 
 class Meta:
     def __init__(self, kind):
+        self.kind = kind
         self.json_path = kind_dir(kind) / "meta.json"
         self.by_label = {}      # label -> dict   (what is on disk)
         self._index = {}        # norm_key -> label
@@ -40,10 +56,13 @@ class Meta:
             except ValueError:
                 self.by_label = {}
         self._index = {norm_key(l): l for l in self.by_label}
-        for m in self.by_label.values():           # merge language variants in existing data
+        for m in self.by_label.values():           # merge language / country variants in existing data
             langs = sorted({norm_language(x) for x in m.get("languages", [])})
             if langs != m.get("languages", []) and m.get("languages"):
                 m["languages"], self.dirty = langs, True
+            places = sorted({norm_country(x) for x in m.get("countries", [])})
+            if places != m.get("countries", []) and m.get("countries"):
+                m["countries"], self.dirty = places, True
 
     # ---- persistence
     def save(self):
@@ -76,6 +95,8 @@ class Meta:
                 continue                         # (older data) a locked title
             if k == "languages":
                 v = [norm_language(x) for x in as_list(v)]
+            elif k == "countries":
+                v = [norm_country(x) for x in as_list(v)]
             if k in LIST_FIELDS:
                 vals = set(as_list(v))
                 cur[k] = sorted(vals if k in replace else set(cur.get(k, [])) | vals)
@@ -86,6 +107,17 @@ class Meta:
             else:
                 cur[k] = v
         if json.dumps(cur, sort_keys=True) != before:
+            self.dirty = True
+
+    def stamp_added(self, label, ts=None):
+        """Remember when an item joined the library (only the first time)."""
+        key = self._index.get(norm_key(label))
+        if key is None:
+            key = label
+            self._index[norm_key(label)] = label
+            self.by_label[label] = {}
+        if not self.by_label[key].get("added"):
+            self.by_label[key]["added"] = ts or time.time()
             self.dirty = True
 
     def rename(self, old, new):
@@ -120,7 +152,10 @@ class Meta:
         return bool(m.get("genres") and (m.get("countries") or m.get("creators")))
 
     def values(self, label, facet):
-        return as_list(self.get(label).get(FACETS[facet]))
+        v = as_list(self.get(label).get(FACETS[facet]))
+        if facet == "genre" and self.kind == "albums":
+            return genres.broad(v)                        # hundreds of raw tags -> a short list of real genres
+        return v
 
     def facet_counts(self, labels, facet) -> Counter:
         c = Counter()
