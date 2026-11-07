@@ -1,0 +1,368 @@
+"""Window chrome drawn by the app itself: title bar with window buttons, edge resizing, and frameless modal dialogs
+(plus small replacements for the stock input / message boxes)."""
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainterPath, QPixmap, QRegion
+from PySide6.QtWidgets import (QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+                               QVBoxLayout, QWidget)
+
+from ..core.config import ROOT
+from . import icons, theme
+from . import widgets
+from .widgets import button, label
+
+
+def window_button(icon, tip, role="winbtn"):
+    b = QPushButton()
+    b.setObjectName(role)
+    b.setIcon(icons.icon(icon, theme.MUTED, 15))
+    b.setIconSize(QSize(15, 15))
+    b.setToolTip(tip)
+    b.setCursor(Qt.CursorShape.ArrowCursor)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    if role == "winclose":                          # white cross on the red hover, so it stays readable
+        normal, bright = icons.icon(icon, theme.MUTED, 15), icons.icon(icon, "#ffffff", 15)
+        b.enterEvent = lambda e, b=b, i=bright, f=b.enterEvent: (b.setIcon(i), f(e))
+        b.leaveEvent = lambda e, b=b, i=normal, f=b.leaveEvent: (b.setIcon(i), f(e))
+    return b
+
+
+class DragBar(QWidget):
+    """Empty bar that moves its window when dragged (and maximizes on double click when `maximizable`)."""
+
+    def __init__(self, maximizable=False):
+        super().__init__()
+        self.maximizable = maximizable
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.window().windowHandle():
+            self.window().windowHandle().startSystemMove()
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self.maximizable and e.button() == Qt.MouseButton.LeftButton:
+            w = self.window()
+            w.showNormal() if w.isMaximized() else w.showMaximized()
+
+
+class TitleBar(DragBar):
+    """App title bar: logo + name on the left, minimize / maximize / close on the right."""
+
+    def __init__(self, win):
+        super().__init__(maximizable=True)
+        self.win = win
+        self.setObjectName("titlebar")
+        self.setFixedHeight(40)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 0, 0, 0)
+        h.setSpacing(10)
+        logo = QLabel()
+        pm = QPixmap(str(ROOT / "assets" / "logo.png")).scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                Qt.TransformationMode.SmoothTransformation)
+        pm.setDevicePixelRatio(2.0)
+        logo.setPixmap(pm)
+        logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        name = label("Patchwork", "brand")
+        name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        h.addWidget(logo)
+        h.addWidget(name)
+        h.addStretch()
+        self.btn_min = window_button("minus", "Minimize")
+        self.btn_max = window_button("square", "Maximize")
+        self.btn_close = window_button("x", "Close", "winclose")
+        self.btn_min.clicked.connect(win.showMinimized)
+        self.btn_max.clicked.connect(lambda: win.showNormal() if win.isMaximized() else win.showMaximized())
+        self.btn_close.clicked.connect(win.close)
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            h.addWidget(b)
+
+    def sync_state(self):
+        maxed = self.win.isMaximized()
+        self.btn_max.setIcon(icons.icon("restore" if maxed else "square", theme.MUTED, 15))
+        self.btn_max.setToolTip("Restore" if maxed else "Maximize")
+
+
+class EdgeResizer(QWidget):
+    """Lets a frameless top-level window be resized from its edges and corners (done by hand: works the same everywhere).
+    `inset` is the transparent margin around the visible frame (the shadow area of a dialog)."""
+
+    def __init__(self, win, inset=(0, 0, 0, 0), margin=6, top_margin=None):
+        super().__init__(win)
+        self.hide()
+        self.win, self.inset, self.margin = win, inset, margin
+        self.top_margin = margin if top_margin is None else top_margin
+        self.active, self.drag = False, None
+        QGuiApplication.instance().installEventFilter(self)
+        self.timer = QTimer(self, interval=30)
+        self.timer.timeout.connect(self.update_cursor)
+        self.timer.start()
+
+    def release(self):
+        """The window is closed: stop watching the whole app and give the cursor back."""
+        self.timer.stop()
+        QGuiApplication.instance().removeEventFilter(self)
+        self.drag = None
+        if self.active:
+            QGuiApplication.restoreOverrideCursor()
+            self.active = False
+
+    def frame(self):
+        l, t, r, b = self.inset
+        return self.win.geometry().adjusted(l, t, -r, -b)
+
+    def edges(self, pos=None):
+        w = self.win
+        if w.isMaximized() or w.isFullScreen() or not w.isVisible():
+            return Qt.Edge(0)
+        pos = pos or QCursor.pos()
+        under = QGuiApplication.instance().widgetAt(pos)
+        if under is None or under.window() is not w:
+            return Qt.Edge(0)
+        r, m = self.frame(), self.margin
+        if not r.contains(pos):
+            return Qt.Edge(0)
+        e = Qt.Edge(0)
+        if pos.x() - r.left() < m:
+            e |= Qt.Edge.LeftEdge
+        if r.right() - pos.x() < m:
+            e |= Qt.Edge.RightEdge
+        if pos.y() - r.top() < self.top_margin:
+            e |= Qt.Edge.TopEdge
+        if r.bottom() - pos.y() < m:
+            e |= Qt.Edge.BottomEdge
+        return e
+
+    @staticmethod
+    def shape(e):
+        horiz = bool(e & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge))
+        vert = bool(e & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge))
+        if horiz and vert:
+            main = e in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+            return Qt.CursorShape.SizeFDiagCursor if main else Qt.CursorShape.SizeBDiagCursor
+        return Qt.CursorShape.SizeHorCursor if horiz else Qt.CursorShape.SizeVerCursor
+
+    def update_cursor(self):
+        if self.drag:
+            return
+        e = self.edges()
+        if e:
+            if self.active:
+                QGuiApplication.changeOverrideCursor(QCursor(self.shape(e)))
+            else:
+                QGuiApplication.setOverrideCursor(QCursor(self.shape(e)))
+                self.active = True
+        elif self.active:
+            QGuiApplication.restoreOverrideCursor()
+            self.active = False
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+            e = self.edges(ev.globalPosition().toPoint())
+            if e:
+                self.drag = (e, ev.globalPosition().toPoint(), self.win.geometry())
+                return True
+        elif self.drag and t == QEvent.Type.MouseMove:
+            self.resize_to(ev.globalPosition().toPoint())
+            return True
+        elif self.drag and t == QEvent.Type.MouseButtonRelease:
+            self.drag = None
+            return True
+        return False
+
+    def resize_to(self, pos):
+        e, start, g0 = self.drag
+        d = pos - start
+        hint = self.win.minimumSizeHint()                # an explicit minimum size wins; otherwise what the content needs
+        mw, mh = self.win.minimumWidth() or hint.width(), self.win.minimumHeight() or hint.height()
+        g = g0.adjusted(0, 0, 0, 0)
+        if e & Qt.Edge.LeftEdge:
+            g.setLeft(min(g0.left() + d.x(), g0.right() - mw + 1))
+        if e & Qt.Edge.RightEdge:
+            g.setRight(max(g0.right() + d.x(), g0.left() + mw - 1))
+        if e & Qt.Edge.TopEdge:
+            g.setTop(min(g0.top() + d.y(), g0.bottom() - mh + 1))
+        if e & Qt.Edge.BottomEdge:
+            g.setBottom(max(g0.bottom() + d.y(), g0.top() + mh - 1))
+        self.win.setGeometry(g)
+
+
+def round_window_corners(win):
+    """Windows 11: round the corners of a frameless window and keep its thin system border - but not when it fills
+    the screen (maximized / fullscreen), where both would show as a gap or an outline at the screen edge."""
+    try:
+        import ctypes
+        full = win.isMaximized() or win.isFullScreen()
+        pref = ctypes.c_int(1 if full else 2)                       # DWMWCP_DONOTROUND / DWMWCP_ROUND
+        border = ctypes.c_uint(0xFFFFFFFE if full else 0xFFFFFFFF)  # DWMWA_COLOR_NONE / DWMWA_COLOR_DEFAULT
+        hwnd = int(win.winId())
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border), 4)
+    except Exception:
+        pass
+
+
+class Polisher(QObject):
+    """Application-wide touches: menus / dropdown popups get rounded translucent windows, and buttons only take keyboard
+    focus once the user starts using the keyboard (so a dialog never opens with a highlighted button)."""
+
+    def __init__(self):
+        super().__init__()
+        self.keys = False
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QEvent.Type.Polish and isinstance(obj, QWidget):
+            if isinstance(obj, QMenu) and not obj.property("_rounded"):    # menus: rounded, translucent popup window
+                obj.setProperty("_rounded", True)
+                obj.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+                obj.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+                obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            if isinstance(obj, QComboBox) and not obj.property("_rounded"):
+                obj.setProperty("_rounded", True)
+                box = obj.view().window()               # the popup frame: rounded with a mask, so no window changes are needed
+                box.installEventFilter(self)
+        elif t in (QEvent.Type.Show, QEvent.Type.Resize) and isinstance(obj, QWidget) and                 obj.metaObject().className() == "QComboBoxPrivateContainer":
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(obj.rect()), theme.RADIUS, theme.RADIUS)
+            obj.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        elif t == QEvent.Type.KeyPress and not self.keys and ev.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keys = True
+            for w in QGuiApplication.instance().allWidgets():
+                if isinstance(w, QPushButton) and w.focusPolicy() == Qt.FocusPolicy.NoFocus and w.objectName() not in ("winbtn", "winclose", "dlgclose"):
+                    w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            widgets.KEYBOARD = True
+        return False
+
+
+# ====================================================================== modal dialogs
+class Modal(QDialog):
+    """Frameless rounded dialog with its own title bar and a soft shadow. Put content into `self.body`."""
+
+    def __init__(self, parent, title, width=480, resizable=True):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setModal(True)
+        self.setWindowTitle(title)
+        self._placed = False
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 24)
+        frame = QFrame()
+        frame.setObjectName("dialog")
+        shadow = QGraphicsDropShadowEffect(frame)
+        shadow.setBlurRadius(36)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 190))
+        frame.setGraphicsEffect(shadow)
+        outer.addWidget(frame)
+        fv = QVBoxLayout(frame)
+        fv.setContentsMargins(0, 0, 0, 0)
+        fv.setSpacing(0)
+        bar = DragBar()
+        bar.setObjectName("dlgbar")
+        bh = QHBoxLayout(bar)
+        bh.setContentsMargins(22, 14, 14, 6)
+        self.title_lbl = label(title, "dlgtitle")
+        self.title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.title_lbl.setFixedHeight(32)               # same height as the close button, so both centre on one line
+        self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        close = window_button("x", "Close", "dlgclose")
+        close.clicked.connect(self.reject)
+        bh.addWidget(self.title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+        bh.addWidget(close, 0, Qt.AlignmentFlag.AlignVCenter)
+        fv.addWidget(bar)
+        self.body = QVBoxLayout()
+        self.body.setContentsMargins(22, 6, 22, 20)
+        self.body.setSpacing(12)
+        fv.addLayout(self.body, 1)
+        self.setMinimumWidth(min(width, 360) + 40)
+        self.resize(width + 40, 100)
+        if resizable:
+            self.resizer = EdgeResizer(self, inset=(20, 16, 20, 24), margin=6)
+
+    def done(self, result):
+        r = getattr(self, "resizer", None)
+        if r is not None:
+            r.release()
+        super().done(result)
+
+    def footer(self, ok_text="OK", ok_icon=None, on_ok=None, on_cancel=None, extra=None, danger=False, cancel_text="Cancel"):
+        self.body.addSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        if extra:
+            extra.setContentsMargins(0, 0, 0, 0)
+            extra.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+            row.addWidget(extra, 0, Qt.AlignmentFlag.AlignBottom)
+        row.addStretch()
+        cancel = None
+        if cancel_text:
+            cancel = button(cancel_text, None)
+            cancel.clicked.connect(on_cancel or self.reject)
+            row.addWidget(cancel)
+        ok = button(ok_text, ok_icon, "dangerfill" if danger else "primary")
+        ok.clicked.connect(on_ok or self.accept)
+        row.addWidget(ok)
+        width = max(116, ok.sizeHint().width() + 8, cancel.sizeHint().width() + 8 if cancel else 0)
+        for b in (cancel, ok):                          # same width, with comfortable padding
+            if b:
+                b.setFixedWidth(width)
+                b.setAutoDefault(False)
+        ok.setDefault(True)
+        self.body.addLayout(row)
+        return ok
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._placed:                      # center over the main window, keep inside the screen
+            self._placed = True
+            hint = self.sizeHint()                       # grow to fit the content, but never shrink below the size asked for
+            self.resize(max(self.width(), hint.width()), max(self.height(), hint.height()))
+            par = self.parentWidget().window() if self.parentWidget() else None
+            screen = (par.screen() if par else QGuiApplication.primaryScreen()).availableGeometry()
+            if par:                                       # never bigger than about 90% of the main window
+                self.resize(min(self.width(), int(par.width() * 0.9) + 40), min(self.height(), int(par.height() * 0.9) + 40))
+            if self.width() > screen.width() - 40:
+                self.resize(screen.width() - 60, self.height())
+            if self.height() > screen.height() - 40:
+                self.resize(self.width(), screen.height() - 60)
+            c = par.frameGeometry().center() if par else screen.center()
+            self.move(max(screen.left(), min(c.x() - self.width() // 2, screen.right() - self.width())),
+                      max(screen.top(), min(c.y() - self.height() // 2, screen.bottom() - self.height())))
+
+
+def _fit(text, minimum=420):
+    """Dialog content width that shows `text` (possibly several lines) without wrapping."""
+    from PySide6.QtGui import QFontMetrics
+    fm = QFontMetrics(QGuiApplication.font())
+    return max(minimum, max(fm.horizontalAdvance(line) for line in text.splitlines() or [""]) + 48)
+
+
+def confirm(parent, title, text, ok="OK", danger=False) -> bool:
+    d = Modal(parent, title, _fit(text), resizable=False)
+    d.body.addWidget(label(text, None))
+    d.footer(ok, None, danger=danger)
+    return bool(d.exec())
+
+
+def notify(parent, title, text):
+    d = Modal(parent, title, _fit(text), resizable=False)
+    d.body.addWidget(label(text, None))
+    d.footer("OK", None, cancel_text=None)
+    d.exec()
+
+
+def ask_text(parent, title, prompt, text="", ok="OK"):
+    """Single-line input. Returns the entered text, or None when cancelled / empty."""
+    d = Modal(parent, title, _fit(prompt), resizable=False)
+    d.body.addWidget(label(prompt, "muted"))
+    edit = QLineEdit(text)
+    edit.selectAll()
+    edit.returnPressed.connect(d.accept)
+    d.body.addWidget(edit)
+    d.footer(ok, None)
+    edit.setFocus()
+    if d.exec() and edit.text().strip():
+        return edit.text().strip()
+    return None

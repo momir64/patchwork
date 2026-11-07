@@ -1,0 +1,472 @@
+"""Small reusable widgets: wrapping layout, buttons with icons, segmented control, section headers."""
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QSizePolicy, QSpinBox,
+                               QSpacerItem, QVBoxLayout, QWidget)
+
+from . import icons, theme
+
+
+class FlowLayout(QLayout):
+    """Lays widgets out left to right and wraps to the next line when the window gets narrow."""
+
+    def __init__(self, parent=None, spacing=8):
+        super().__init__(parent)
+        self.items, self._space = [], spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self.items.append(item)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, i):
+        return self.items[i] if 0 <= i < len(self.items) else None
+
+    def takeAt(self, i):
+        return self.items.pop(i) if 0 <= i < len(self.items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._layout(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for i in self.items:
+            s = s.expandedTo(i.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _layout(self, rect, test):
+        x, y, line_h = rect.x(), rect.y(), 0
+        for it in self.items:
+            if it.isEmpty():
+                continue
+            hint = it.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line_h > 0:
+                x, y, line_h = rect.x(), y + line_h + self._space, 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._space
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
+
+KEYBOARD = False        # set once the user presses Tab; until then buttons never show a focus ring
+
+
+class Btn(QPushButton):
+    """Button whose icon and text are separate labels: exact 8px gap, both centered on the same line."""
+    GAP = 8
+
+    def __init__(self, text="", icon=None, role=None, tip=None, size=17, height=None, pad=None, color=None):
+        super().__init__()
+        if role:
+            self.setObjectName(role)
+        self.role, self.icon_name, self.icon_size, self.fixed_color = role, icon, size, color
+        self.full, self._hover, self._pixmap = text, False, None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus if KEYBOARD else Qt.FocusPolicy.NoFocus)
+        self.setFixedHeight(height or theme.HEIGHT + 2)      # +2: the border, so it matches inputs and dropdowns
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)     # natural width unless a layout stretches it
+        if tip:
+            self.setToolTip(tip)
+        self.lay = QHBoxLayout(self)
+        pad = (0 if role == "icon" else 10 if role == "ghost" else 12) if pad is None else pad
+        self.lay.setContentsMargins(pad, 0, pad, 0)
+        self.lay.setSpacing(0)
+        self.lead = QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.trail = QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.ic, self.tx = QLabel(), QLabel(text)
+        self.ic.setFixedSize(size, size)
+        self.ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tx.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        for w in (self.ic, self.tx):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.lay.addItem(self.lead)
+        self.lay.addWidget(self.ic)
+        self.lay.addWidget(self.tx)
+        self.lay.addItem(self.trail)
+        if role == "icon":
+            self.setFixedWidth(self.height())
+        self.toggled.connect(lambda _: self._paint())
+        self._sync()
+
+    # ---- content
+    def setText(self, text):
+        self.full_shown = text
+        self.tx.setText(text)
+        self._sync()
+
+    def text(self):
+        return self.tx.text()
+
+    def set_icon_name(self, name):
+        self.icon_name = name
+        self._sync()
+
+    def set_pixmap(self, pm):
+        self._pixmap = pm
+        self._sync()
+
+    def align_left(self):
+        self.lead.changeSize(0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        self.lay.invalidate()
+
+    def _sync(self):
+        has_text = bool(self.tx.text())
+        has_icon = bool(self.icon_name or self._pixmap)
+        self.tx.setVisible(has_text)
+        self.ic.setVisible(has_icon)
+        self.tx.setContentsMargins(self.GAP if has_icon else 0, 0, 0, 3)     # 3px: the font has more room below the baseline than above the caps
+        self._paint()
+        self.updateGeometry()
+
+    def _color(self):
+        if self.fixed_color:
+            return self.fixed_color
+        if not self.isEnabled():
+            return "#8a85ad" if self.role in ("primary", "dangerfill") else theme.DIM
+        if self.role in ("primary", "dangerfill"):
+            return "#ffffff"
+        if self.role == "seg":
+            return theme.TEXT if (self.isChecked() or self._hover) else theme.MUTED
+        if self.role == "toggle" and self.isChecked():
+            return theme.ACCENT_H
+        if self.role == "bignav" and self.isChecked():
+            return "#ffffff"
+        if self.role == "ghost":
+            return theme.TEXT if self._hover else theme.MUTED
+        return theme.TEXT
+
+    def _paint(self):
+        col = self._color()
+        self.tx.setStyleSheet(f"color: {col}; background: transparent;" + (" font-weight: 600;" if self.role in ("primary", "dangerfill") or (self.role == "bignav" and self.isChecked()) else ""))
+        if self._pixmap is not None:
+            self.ic.setPixmap(self._pixmap)
+        elif self.icon_name:
+            self.ic.setPixmap(icons.pixmap(self.icon_name, col, self.icon_size))
+
+    def enterEvent(self, e):
+        self._hover = True
+        self._paint()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self._paint()
+        super().leaveEvent(e)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.EnabledChange:
+            self._paint()
+        super().changeEvent(e)
+
+    def sizeHint(self):
+        return QSize(self.lay.sizeHint().width(), self.height())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+
+def button(text="", icon=None, role=None, tip=None, color=None, size=17) -> Btn:
+    return Btn(text, icon, role, tip, size=size, color=color)
+
+
+class Segmented(QFrame):
+    """Rounded container with flat toggle buttons, exactly one active. Emits changed(value)."""
+    changed = Signal(object)
+
+    def __init__(self, options, value=None, icons_=None):
+        super().__init__()
+        self.setObjectName("segbar")
+        self.setFixedHeight(theme.HEIGHT + 2)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons = {}
+        h = QHBoxLayout(self)
+        h.setContentsMargins(3, 3, 3, 3)
+        h.setSpacing(2)
+        for text, val in options:
+            b = Btn(text, (icons_ or {}).get(val), "seg", size=16, height=theme.HEIGHT - 6, pad=12)
+            b.setCheckable(True)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.clicked.connect(lambda _=False, v=val: self.set_value(v))
+            self.group.addButton(b)
+            h.addWidget(b, 1)
+            self.buttons[val] = b
+        self.value = value if value in self.buttons else options[0][1]
+        self.buttons[self.value].setChecked(True)
+
+    def set_value(self, v, emit=True):
+        if v not in self.buttons:
+            return
+        changed = v != self.value
+        self.value = v
+        self.buttons[v].setChecked(True)
+        if emit and changed:
+            self.changed.emit(v)
+
+    def set_enabled_for(self, value, enabled):
+        self.buttons[value].setEnabled(enabled)
+
+
+class Chips(QWidget):
+    """Wrapping row of pill toggles (exclusive)."""
+    changed = Signal(object)
+
+    def __init__(self, options, value=None):
+        super().__init__()
+        self.flow = FlowLayout(self, 5)
+        self.group = QButtonGroup(self)
+        self.buttons = {}
+        for text, val in options:
+            b = QPushButton(text)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, v=val: self.set_value(v))
+            self.group.addButton(b)
+            self.flow.addWidget(b)
+            self.buttons[val] = b
+        self.value = value if value in self.buttons else options[0][1]
+        self.buttons[self.value].setChecked(True)
+
+    def set_value(self, v, emit=True):
+        self.value = v
+        self.buttons[v].setChecked(True)
+        if emit:
+            self.changed.emit(v)
+
+
+def label(text, role=None, wrap=False) -> QLabel:
+    l = QLabel(text)
+    if role:
+        l.setObjectName(role)
+    l.setWordWrap(wrap)
+    return l
+
+
+def divider() -> QFrame:
+    f = QFrame()
+    f.setObjectName("divider")
+    return f
+
+
+def section_header(text) -> QLabel:
+    l = QLabel(text.upper())
+    l.setObjectName("section")
+    l.setContentsMargins(0, 0, 0, 0)
+    return l
+
+
+def form_row(name, widget, label_w=84) -> QWidget:
+    """Label on the left, control on the right - every row uses the same label width."""
+    w = QWidget()
+    h = QHBoxLayout(w)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(12)
+    l = QLabel(name)
+    l.setObjectName("muted")
+    l.setFixedWidth(label_w)
+    h.addWidget(l)
+    h.addWidget(widget, 1)
+    return w
+
+
+def stacked_row(name, widget) -> QWidget:
+    """Label above a full-width control (for wide controls)."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(6)
+    v.addWidget(label(name, "muted"))
+    v.addWidget(widget)
+    return w
+
+
+class StatusLabel(QLabel):
+    """One-line message that elides with ... instead of forcing the window wider."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("muted")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.full = ""
+
+    def set_message(self, text):
+        self.full = text.splitlines()[0] if text else ""
+        self.setToolTip(text)
+        self._elide()
+
+    def _elide(self):
+        self.setText(self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, max(0, self.width())))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+
+class SearchBox(QFrame):
+    """Input look-alike with a vertically centered magnifier and a clear button."""
+    textChanged = Signal(str)
+
+    def __init__(self, placeholder="Search..."):
+        super().__init__()
+        self.setObjectName("search")
+        h = QHBoxLayout(self)
+        h.setContentsMargins(11, 0, 4, 0)
+        h.setSpacing(8)
+        ic = QLabel()
+        ic.setPixmap(icons.pixmap("search", theme.DIM, 16))
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText(placeholder)
+        self.edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0; min-height: 30px; }")
+        self.edit.textChanged.connect(self.textChanged)
+        self.edit.installEventFilter(self)
+        h.addWidget(ic)
+        h.addWidget(self.edit, 1)
+        self.clear_btn = QPushButton()                 # own clear button: centered, same muted look as the magnifier
+        self.clear_btn.setObjectName("mini")
+        self.clear_btn.setIcon(icons.icon("x", theme.DIM, 14))
+        self.clear_btn.setIconSize(QSize(14, 14))
+        self.clear_btn.setFixedSize(24, 24)
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.clear_btn.setToolTip("Clear")
+        self.clear_btn.clicked.connect(self.edit.clear)
+        self.clear_btn.setVisible(False)
+        self.edit.textChanged.connect(lambda t: self.clear_btn.setVisible(bool(t)))
+        h.addWidget(self.clear_btn)
+
+    def text(self):
+        return self.edit.text()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.setProperty("focus", ev.type() == QEvent.Type.FocusIn)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        return False
+
+
+def vbox(*widgets, spacing=8, margins=(0, 0, 0, 0)) -> QVBoxLayout:
+    v = QVBoxLayout()
+    v.setSpacing(spacing)
+    v.setContentsMargins(*margins)
+    for w in widgets:
+        v.addWidget(w) if isinstance(w, QWidget) else v.addLayout(w)
+    return v
+
+
+def hbox(*widgets, spacing=8, margins=(0, 0, 0, 0)) -> QHBoxLayout:
+    h = QHBoxLayout()
+    h.setSpacing(spacing)
+    h.setContentsMargins(*margins)
+    for w in widgets:
+        if w == "stretch":
+            h.addStretch()
+        elif isinstance(w, QWidget):
+            h.addWidget(w)
+        else:
+            h.addLayout(w)
+    return h
+
+
+class UnitSpin(QSpinBox):
+    """Number input whose unit (px, %...) is shown right-aligned inside the field, outside the editable text,
+    so typing never has to deal with it."""
+
+    def __init__(self, unit=""):
+        super().__init__()
+        self.unit_lbl = QLabel(unit, self.lineEdit())
+        self.unit_lbl.setStyleSheet(f"color: {theme.DIM}; background: transparent;")
+        self.unit_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        w = self.unit_lbl.fontMetrics().horizontalAdvance(unit) + 4 if unit else 0
+        self.lineEdit().setTextMargins(0, 0, w, 0)
+        self.valueChanged.connect(self._place)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def _place(self, *_):
+        le = self.lineEdit()
+        self.unit_lbl.adjustSize()
+        self.unit_lbl.move(le.width() - self.unit_lbl.width() - 2, (le.height() - self.unit_lbl.height()) // 2)
+        self.unit_lbl.setVisible(not (self.specialValueText() and self.value() == self.minimum()))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._place()
+
+
+class ProgressLine(QWidget):
+    """Thin rounded progress bar. Everything, including the sliding "working..." segment, is clipped to the rounded track,
+    so nothing ever sticks out over the corners (QProgressBar's busy chunk does)."""
+
+    def __init__(self):
+        super().__init__()
+        self.lo, self.hi, self.val, self.phase = 0, 100, 0, 0.0
+        self.setFixedHeight(6)
+        self.timer = QTimer(self, interval=16)
+        self.timer.timeout.connect(self._tick)
+
+    def setRange(self, lo, hi):
+        self.lo, self.hi = lo, hi
+        self._timer()
+        self.update()
+
+    def setValue(self, v):
+        self.val = v
+        self.update()
+
+    def _timer(self):
+        on = self.hi <= self.lo and self.isVisible()
+        if on and not self.timer.isActive():
+            self.timer.start()
+        elif not on:
+            self.timer.stop()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._timer()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.timer.stop()
+
+    def _tick(self):
+        self.phase = (self.phase + 0.012) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        track = QPainterPath()
+        track.addRoundedRect(r, r.height() / 2, r.height() / 2)
+        p.fillPath(track, QColor(theme.SURFACE2))
+        p.setClipPath(track)
+        if self.hi > self.lo:
+            w = r.width() * (self.val - self.lo) / (self.hi - self.lo)
+            if w > 0:
+                p.fillRect(QRectF(0, 0, w, r.height()), QColor(theme.ACCENT))
+        else:
+            seg = r.width() * 0.3
+            x = -seg + (r.width() + seg) * self.phase
+            p.fillRect(QRectF(x, 0, seg, r.height()), QColor(theme.ACCENT))
