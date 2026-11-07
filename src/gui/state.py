@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, Signal
 
 from ..core.config import DATA_DIR, Config
 from ..core.groups import Groups
+from ..core import editions
 from ..core.library import KINDS, Library, fix_renamed_titles
 from .common import ThumbLoader
 
@@ -20,6 +21,8 @@ class AppState(QObject):
         self.cfg = Config()
         self.libs = {k: Library(k) for k in KINDS}
         fix_renamed_titles(self.libs)
+        for lib in self.libs.values():
+            editions.sweep(lib)
         self.groups = Groups()
         self.thumbs = ThumbLoader()
         self.picks = []             # [(kind, label)] handed to the collage page from a library / group view
@@ -61,6 +64,8 @@ class AppState(QObject):
         for lib in self.libs.values():
             lib.load()
         fix_renamed_titles(self.libs)
+        for lib in self.libs.values():
+            editions.sweep(lib)
         self.groups.refresh()
         self.thumbs.cache.clear()
         self.changed.emit()

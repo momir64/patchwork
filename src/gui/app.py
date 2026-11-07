@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPa
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QInputDialog, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
 from ..core.config import DATA_DIR, ROOT, Config
+from ..core import editions
 from ..core.library import KINDS, Library
 from ..sources import Sync
 from ..sources.sync import Cancelled
@@ -135,6 +136,8 @@ class MainWindow(QMainWindow):
             page.reload()
 
     def data_changed(self):
+        for lib in self.state.libs.values():
+            editions.sweep(lib)                       # duplicates hidden earlier come back once they are no longer duplicates
         shown = self.page_for.get(self.current_key)
         for p in self.all_media_pages():
             if p is shown:

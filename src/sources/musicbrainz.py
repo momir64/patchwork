@@ -12,12 +12,12 @@ _lock, _last = threading.Lock(), [0.0]
 
 def _get(path, **params):
     with _lock:                                   # one request at a time, spaced out
-        wait = 1.1 - (time.time() - _last[0])
-        if wait > 0:
-            time.sleep(wait)
         for attempt in range(2):
-            r = session.get(f"{API}/{path}", params={**params, "fmt": "json"}, headers=HEADERS, timeout=TIMEOUT)
+            wait = 1.05 - (time.time() - _last[0])          # spaced from the START of the previous request, not its end
+            if wait > 0:
+                time.sleep(wait)
             _last[0] = time.time()
+            r = session.get(f"{API}/{path}", params={**params, "fmt": "json"}, headers=HEADERS, timeout=TIMEOUT)
             if r.status_code in (429, 503) and attempt == 0:
                 time.sleep(3)
                 continue

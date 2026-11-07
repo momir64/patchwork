@@ -1,12 +1,10 @@
 """Finds the same title more than once: albums in several editions (Deluxe, Remastered...), shows / movies listed with and
 without a year or country tag ("Archer" / "Archer (2009)")."""
-import json
 import re
-import shutil
 from collections import defaultdict
 
 from .config import kind_dir
-from .names import norm_key, safe_filename
+from .names import norm_key
 
 WORDS = (r"deluxe|remaster(?:ed)?|edition|expanded|anniversary|version|bonus|special|explicit|clean|reissue|re-issue|"
          r"collector'?s?|super|legacy|mono|stereo|original|digital|extended|platinum|limited|tour")
@@ -87,41 +85,45 @@ def simplest(group, kind="albums") -> str:
     return min(group, key=lambda l: (not plain(l), len(l), l.casefold()))
 
 
-# ---- merge records: what a merge removed is kept, so the choice can be changed (or the merge undone) later
-def _merged_file(kind):
-    return kind_dir(kind) / "merged.json"
+# ---- titles hidden because they are a duplicate; they come back as soon as they stop being one
+def _hidden_file(kind):
+    return kind_dir(kind) / "duplicate_hidden.txt"
 
 
-def merged_dir(kind):
-    return kind_dir(kind) / "merged_posters"
+def load_dup_hidden(kind) -> set:
+    p = _hidden_file(kind)
+    return {l.strip() for l in p.read_text(encoding="utf-8").splitlines() if l.strip()} if p.exists() else set()
 
 
-def load_merged(kind) -> dict:
-    """{kept label: {"chosen": label, "members": {label: {"meta": {...}, "fav": bool, "poster": path or None}}}}"""
-    try:
-        return json.loads(_merged_file(kind).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def save_merged(kind, data: dict):
-    p = _merged_file(kind)
-    if data:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+def save_dup_hidden(kind, labels):
+    p = _hidden_file(kind)
+    if labels:
+        p.write_text("\n".join(sorted(labels)) + "\n", encoding="utf-8")
     elif p.exists():
         p.unlink()
 
 
-def snapshot(kind, lib, label) -> dict:
-    """Copy a title's details and poster aside before a merge removes or overwrites them."""
-    poster = lib.poster(label)
-    saved = None
-    if poster:
-        merged_dir(kind).mkdir(parents=True, exist_ok=True)
-        dest = merged_dir(kind) / (safe_filename(label) + poster.suffix)
-        shutil.copy2(poster, dest)
-        saved = str(dest)
-    return {"meta": json.loads(json.dumps(lib.meta.get(label))), "fav": lib.is_fav(label), "poster": saved}
+def sweep(lib) -> bool:
+    """Unhide titles that were hidden as duplicates but are no longer part of a duplicate set (the other one was renamed,
+    removed or marked 'not duplicates'). Returns True when something changed."""
+    kind = lib.kind
+    rec = load_dup_hidden(kind)
+    if not rec:
+        return False
+    live = {norm_key(l) for g in groups(lib.items, kind) for l in g}
+    keep, changed = set(), False
+    for l in rec:
+        if not lib.has(l) or not lib.is_hidden(l):
+            changed = True                              # gone, or you unhid it yourself
+        elif norm_key(l) in live:
+            keep.add(l)
+        else:
+            lib.set_hidden(l, False)
+            changed = True
+    if changed:
+        save_dup_hidden(kind, keep)
+        lib.save()
+    return changed
 
 
 def dedupe(items, is_fav=lambda l: False, plays=lambda l: 0):

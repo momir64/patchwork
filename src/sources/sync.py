@@ -179,13 +179,16 @@ class Sync:
                 m = lib.meta.get(label)
                 url = covers.album_cover(self.cfg, (m.get("creators") or [""])[0], m.get("title") or "") if m.get("creators") else None
                 got = download_image(url) if url else None
+            tid = None
             if not got and key and kind != "albums":
-                url = tmdb.poster_url(key, kind, label, (e.tmdb_id if e else None) or lib.meta.get(label).get("ids", {}).get("tmdb"))
+                url, tid = tmdb.poster_url(key, kind, label, (e.tmdb_id if e else None) or lib.meta.get(label).get("ids", {}).get("tmdb"))
                 got = download_image(url) if url else None
-            return got
+            return got, tid
 
         ok = 0
-        for (kind, lib, label, _), got in self._pool(jobs, work):
+        for (kind, lib, label, _), (got, tid) in self._pool(jobs, work):
+            if tid:                                       # remembered, so the metadata step does not search the title again
+                lib.meta.update(label, {"ids": {"tmdb": tid}})
             if got:
                 lib.set_poster(label, got[0], got[1])
                 ok += 1
@@ -204,7 +207,8 @@ class Sync:
                 if kind not in self.kinds:
                     continue
                 lib = self.libs[kind]
-                jobs += [(kind, lib, l) for l in lib.items if self.force_meta or not lib.meta.has_details(l)]
+                jobs += [(kind, lib, l) for l in lib.items
+                         if self.force_meta or not (lib.meta.has_details(l) or lib.meta.get(l).get("tmdb_checked"))]
             if jobs:
                 self.stage("Fetching details (TMDB)")
                 self.log(f"Fetching details for {len(jobs)} titles (TMDB)...")

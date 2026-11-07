@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QInputDialog
                                QMenu, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedLayout, QStyle, QStyledItemDelegate,
                                QVBoxLayout, QWidget)
 
+from ..core import editions
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
 from .widgets import Btn, FlowLayout, SearchBox, Segmented, StatusLabel, button, label
@@ -139,6 +140,7 @@ class CardDelegate(QStyledItemDelegate):
     def __init__(self, square: bool):
         super().__init__()
         self.square, self.width, self.base = square, 170, 170     # width = actual card width, base = chosen size
+        self.hover_row = -1                                        # the card under the mouse (set by the view)
 
     def poster_h(self):
         return self.width if self.square else int(self.width * 1.5)
@@ -152,9 +154,18 @@ class CardDelegate(QStyledItemDelegate):
     def poster_rect(self, cell):
         return QRect(cell.left() + self.PAD, cell.top() + self.PAD, self.width, self.poster_h())
 
-    def hit_rect(self, cell):
-        """The visible card (poster + caption); the padding around it belongs to the empty space."""
-        return QRect(cell.left() + self.PAD, cell.top() + self.PAD, self.width, self.poster_h() + self.GAP + self.TEXT_H)
+    def caption_h(self, index):
+        """Height the caption really needs (1-2 title lines, plus the small line when there is one)."""
+        f = QFont()
+        f.setPixelSize(13)
+        f.setWeight(QFont.Weight.DemiBold)
+        n = len(two_lines(QFontMetrics(f), index.data() or "", self.width - 4))
+        return 17 * max(1, n) + (16 if index.data(ROLE_SUB) else 0)
+
+    def hit_rect(self, cell, index=None):
+        """The visible card (poster + the caption text); the padding and unused caption space belong to the empty space."""
+        cap = self.caption_h(index) if index is not None else self.TEXT_H
+        return QRect(cell.left() + self.PAD, cell.top() + self.PAD, self.width, self.poster_h() + self.GAP + cap)
 
     def star_rect(self, cell):
         pr = self.poster_rect(cell)
@@ -184,7 +195,7 @@ class CardDelegate(QStyledItemDelegate):
             p.setPen(QColor(theme.DIM))
             p.drawText(QRect(pr.left(), pr.center().y() + 10, pr.width(), 18), Qt.AlignmentFlag.AlignCenter,
                        "loading..." if index.data(ROLE_PIX) is None and self._has_poster(index) else "no poster")
-        hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        hovered = index.row() == self.hover_row
         selected = index.data(ROLE_SEL)
         if selected:
             p.fillPath(shape, QColor(139, 108, 255, 60))
@@ -284,9 +295,22 @@ class CardView(QListView):
     def item_at(self, pos):
         """Index of the card under pos, or an invalid index over empty space (gaps, padding, below the last row)."""
         idx = self.indexAt(pos)
-        if idx.isValid() and self.card.hit_rect(self.visualRect(idx)).contains(pos):
+        if idx.isValid() and self.card.hit_rect(self.visualRect(idx), idx).contains(pos):
             return idx
         return QModelIndex()
+
+    def _set_hover(self, row):
+        if row != self.card.hover_row:
+            self.card.hover_row = row
+            self.viewport().update()
+
+    def mouseMoveEvent(self, e):
+        self._set_hover(self.item_at(e.position().toPoint()).row())
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        self._set_hover(-1)
+        super().leaveEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -355,6 +379,9 @@ class MediaPage(QWidget):
             add = button("Add", "plus", tip="Add a title by hand")
             add.clicked.connect(self.add_item)
             head.addWidget(add)
+            lf = button("", "external", "icon", "Show the list as a txt file (hidden titles left out)")
+            lf.clicked.connect(self.open_list_file)
+            head.addWidget(lf)
         else:
             for ic, fn, tip in (("edit", self.rename_group, "Rename group"),
                                 ("external", self.open_group_file, "Show the group's txt file"),
@@ -710,6 +737,13 @@ class MediaPage(QWidget):
             self.state.groups.delete(self.cat, self.group[1])
             self.group_deleted.emit(self.cat, self.group[1])
 
+    def open_list_file(self):
+        """A txt with the titles you see (hidden ones left out), written next to the library's data."""
+        import os
+        path = self.lib.list_path.with_name("shown.txt")
+        path.write_text("\n".join(self.lib.shown_items()) + "\n", encoding="utf-8")
+        os.startfile(path)
+
     def open_group_file(self):
         import os
         os.startfile(self.state.groups.path(self.cat, self.group[1]))
@@ -818,6 +852,9 @@ class MediaPage(QWidget):
             if not self.lib.rename(label_, new, alias=True):
                 notify(self, "Rename", "An item with that title already exists.")
                 return
+            rec = editions.load_dup_hidden(self.cat)
+            if label_ in rec:                                    # a hidden duplicate keeps its mark under the new name
+                editions.save_dup_hidden(self.cat, (rec - {label_}) | {new})
             self.lib.save()
             in_groups = bool(self.state.groups.groups_of(self.cat, label_))
             self.state.groups.replace_member(self.cat, label_, new)

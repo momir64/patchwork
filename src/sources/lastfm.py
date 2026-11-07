@@ -52,7 +52,7 @@ def check(cfg):
 
 
 def fetch_albums(cfg, log=print, progress=None) -> list:
-    return fetch_recent_albums(cfg, log, progress) if cfg.get("LASTFM_SOURCE") == "recent" else fetch_top_albums(cfg)
+    return fetch_recent_albums(cfg, log, progress) if cfg.get("LASTFM_SOURCE") == "recent" else fetch_top_albums(cfg, progress)
 
 
 def fetch_recent_albums(cfg, log=print, progress=None) -> list:
@@ -90,14 +90,17 @@ def fetch_recent_albums(cfg, log=print, progress=None) -> list:
     return out
 
 
-def fetch_top_albums(cfg) -> list:
+def fetch_top_albums(cfg, progress=None) -> list:
     limit = cfg.integer("LASTFM_LIMIT", 1024) or 10 ** 9      # 0 = every album
     albums, page = [], 1
     while len(albums) < limit:
         data = _call(cfg, "user.getTopAlbums", user=cfg.get("LASTFM_USER"),
                      period=cfg.get("LASTFM_PERIOD") or "overall", limit=50, page=page)["topalbums"]
         albums += data.get("album", [])
-        if not data.get("album") or page >= int(data["@attr"]["totalPages"]):
+        pages = min(int(data["@attr"]["totalPages"] or 1), -(-limit // 50))      # pages that will really be needed
+        if progress:
+            progress(page, pages)
+        if not data.get("album") or page >= pages:
             break
         page += 1
     out = []

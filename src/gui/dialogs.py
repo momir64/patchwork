@@ -652,16 +652,14 @@ class DuplicatesDialog(Modal):
         super().__init__(parent, "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s", 820)
         self.state, self.kind, self.lib = state, kind, state.libs[kind]
         plays = lambda l: self.lib.meta.get(l).get("playcount", 0) or 0
-        self.sets = editions.groups(self.lib.items, kind)
+        self.sets = [g for g in editions.groups(self.lib.items, kind)
+                     if sum(not self.lib.is_hidden(l) for l in g) != 1]      # one shown, rest hidden = already resolved
         self.choices, self.changed = [], 0
         if not self.sets:
             self.body.addWidget(label(f"No duplicate {noun}s found.", "muted"))
             self.footer("Close", None, cancel_text=None)
             return
-        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once" +
-                                  (" (Deluxe, Remastered, Explicit...)." if kind == "albums" else " (listed with and without a year or country)."), "muted", wrap=True))
-        self.body.addWidget(label("Click the cover you want to show. The others are moved to Hidden: they stay out of the list and of collages, "
-                                  "and come back if you pick them here later. Tick \"Not duplicates\" if they are really different " + noun + "s (all of them are then shown).", "dim", wrap=True))
+        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once. Click the cover to keep; the others are hidden.", "muted", wrap=True))
         cover_h = EditionTile.W if kind == "albums" else int(EditionTile.W * 1.5)
         grid = AdaptiveGrid()
         for g in self.sets:
@@ -687,11 +685,13 @@ class DuplicatesDialog(Modal):
     def merge(self):
         """The picked title is shown, the rest of its set is hidden. Nothing is deleted or renamed."""
         lib, kind = self.lib, self.kind
+        rec = editions.load_dup_hidden(kind)
         for grp, g in zip(self.choices, self.sets):
             chosen = grp.keep()
             if chosen is None:                                    # really different titles: show all, do not offer again
                 for l in g:
                     lib.set_hidden(l, False)
+                    rec.discard(l)
                 editions.mark_separate(kind, g)
                 self.changed += 1
                 continue
@@ -700,7 +700,9 @@ class DuplicatesDialog(Modal):
                 if lib.is_hidden(l) != want:
                     lib.set_hidden(l, want)
                     self.changed += 1
+                (rec.add if want else rec.discard)(l)
             if any(lib.is_fav(l) for l in g):
                 lib.set_fav(chosen, True)
+        editions.save_dup_hidden(kind, rec)
         lib.save()
         self.accept()
