@@ -367,6 +367,7 @@ class MediaPage(QWidget):
         self.cat = kind or group[0]                     # the category (shows / movies / albums) of everything on this page
         self.lib = state.libs[self.cat]
         self.sel, self.last_row = set(), None
+        self._sel_now, self._sel_history, self._sel_redo = frozenset(), [], []        # for Ctrl+Z
         self.model = ItemModel(state)
         self.model.sel = self.sel
         self.delegate = CardDelegate(square=(self.cat == "albums"))
@@ -467,6 +468,12 @@ class MediaPage(QWidget):
         sc = QShortcut(QKeySequence.StandardKey.SelectAll, self)       # Ctrl+A (a text field that has focus keeps its own select-all)
         sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc.activated.connect(self.select_all)
+        undo = QShortcut(QKeySequence.StandardKey.Undo, self)          # Ctrl+Z: back to the previous selection
+        undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        undo.activated.connect(self.undo_selection)
+        redo = QShortcut(QKeySequence.StandardKey.Redo, self)          # Ctrl+Y / Ctrl+Shift+Z
+        redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        redo.activated.connect(lambda: self.undo_selection(redo=True))
         self.btn_unlink.setVisible(bool(group))
         actions = QWidget()
         actions.setObjectName("bar")
@@ -516,11 +523,13 @@ class MediaPage(QWidget):
         small.setPixmap(icons.pixmap("grid", theme.DIM, 14))
         big.setPixmap(icons.pixmap("grid", theme.DIM, 20))
         zoom = QSlider(Qt.Orientation.Horizontal)
-        zoom.setRange(110, 260)
+        zoom.setRange(60, 260)
         zoom.setValue(self.delegate.base)
         zoom.setFixedSize(100, 34)
         zoom.setToolTip("Poster size")
         zoom.valueChanged.connect(self.set_zoom)
+        self.zoom = zoom
+        self.state.zoom_changed.connect(self._zoom_from_other)
         for w in (small, zoom, big):
             h.addWidget(w)
         return box
@@ -671,9 +680,16 @@ class MediaPage(QWidget):
         self.update_bar()
 
     def set_zoom(self, w):
+        if w == self.delegate.base:
+            return
         self.delegate.base = w
         self.view.apply_zoom()
         self.state.set_pref("zoom", w)
+        self.state.zoom_changed.emit(w)
+
+    def _zoom_from_other(self, w):
+        if w != self.delegate.base:
+            self.zoom.setValue(w)                 # moves the slider, which resizes this page too
 
     # ------------------------------------------------------------ action bar
     def selected(self):
@@ -685,7 +701,27 @@ class MediaPage(QWidget):
         if icon:
             btn.set_icon_name(icon)
 
+    def undo_selection(self, redo=False):
+        src, dst = (self._sel_redo, self._sel_history) if redo else (self._sel_history, self._sel_redo)
+        if not src:
+            return
+        dst.append(self._sel_now)
+        prev = src.pop()
+        self._sel_now = prev
+        self.sel.clear()
+        self.sel.update(prev)
+        if self.mode.value == "sel":
+            self.refresh()
+        self.model.touch_all()
+        self.update_bar()
+
     def update_bar(self):
+        now = frozenset(self.sel)
+        if now != self._sel_now:                      # every selection change passes through here: remember the old one
+            self._sel_history.append(self._sel_now)
+            self._sel_redo.clear()                    # a new change ends the redo chain
+            del self._sel_history[:-50]
+            self._sel_now = now
         n, shown = len(self.sel), len(self.model.items)
         self.info.setText(f"{n} selected" if n else f"{shown} shown")
         self.info.setToolTip("Click posters to select (shift-click for a range), click the star to favorite")

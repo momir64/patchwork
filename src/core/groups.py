@@ -27,10 +27,10 @@ class Groups:
         return self._data[kind]
 
     def _save(self, kind):
-        write_json(self._file(kind), dict(sorted(self._load(kind).items(), key=lambda kv: kv[0].casefold())))
+        write_json(self._file(kind), self._load(kind))                  # the order of the file is the order you arranged
 
     def names(self, kind):
-        return sorted(self._load(kind), key=str.casefold)
+        return list(self._load(kind))
 
     def exists(self, kind, name):
         return name in self._load(kind)
@@ -60,9 +60,19 @@ class Groups:
         d = self._load(kind)
         if new in d or old not in d:
             return False
-        d[new] = d.pop(old)
+        self._data[kind] = {(new if n == old else n): m for n, m in d.items()}     # keeps its place in the order
         self._save(kind)
         return True
+
+    def move(self, kind, name, target, after=False):
+        """Put `name` right before (or after) the group `target`."""
+        d = self._load(kind)
+        if name == target or name not in d or target not in d:
+            return
+        order = [n for n in d if n != name]
+        order.insert(order.index(target) + (1 if after else 0), name)
+        self._data[kind] = {n: d[n] for n in order}
+        self._save(kind)
 
     def groups_of(self, kind, label):
         return [n for n, members in self._load(kind).items() if label in set(members)]

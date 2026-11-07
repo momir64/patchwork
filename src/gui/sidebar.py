@@ -2,8 +2,8 @@
 Collapses to icons on narrow windows."""
 import zlib
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QMimeData, QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QDrag, QPainter, QPixmap
 from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                                QSizePolicy, QVBoxLayout, QWidget)
 
@@ -36,9 +36,13 @@ class BigNav(Btn):
 class NavItem(QPushButton):
     """A nav row: icon + text + count (+ optional "+" button). Labels are children so spacing is exact."""
     plus_clicked = Signal()
+    dropped = Signal(str, bool)           # name of the dragged group, dropped on the lower half of this row
+    MIME = "application/x-patchwork-group"
 
-    def __init__(self, text, icon, tint=None, role="nav", plus_tip=None, indent=12):
+    def __init__(self, text, icon, tint=None, role="nav", plus_tip=None, indent=12, drag_group=None):
         super().__init__()
+        self.drag_group, self._press, self._drop = drag_group, None, None      # drag_group = (kind, name): this row can be dragged
+        self.setAcceptDrops(drag_group is not None)
         self.setObjectName(role)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -93,6 +97,65 @@ class NavItem(QPushButton):
         self.style().polish(self)
         self._paint()
 
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._press = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if (self.drag_group and self._press is not None and e.buttons() & Qt.MouseButton.LeftButton
+                and (e.position().toPoint() - self._press).manhattanLength() > 8):
+            self._press = None
+            mime = QMimeData()
+            mime.setData(self.MIME, f"{self.drag_group[0]}\n{self.drag_group[1]}".encode())
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            drag.setPixmap(self.grab())
+            drag.setHotSpot(e.position().toPoint())
+            self.setDown(False)
+            drag.exec(Qt.DropAction.MoveAction)
+            return
+        super().mouseMoveEvent(e)
+
+    def _dragged(self, e):
+        """The group being dragged, if it is a sibling of this row (same media type)."""
+        if not (self.drag_group and e.mimeData().hasFormat(self.MIME)):
+            return None
+        kind, _, name = bytes(e.mimeData().data(self.MIME)).decode().partition("\n")
+        return name if kind == self.drag_group[0] and name != self.drag_group[1] else None
+
+    def dragEnterEvent(self, e):
+        if self._dragged(e):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if self._dragged(e):
+            e.acceptProposedAction()
+            drop = "after" if e.position().y() > self.height() / 2 else "before"
+            if drop != self._drop:
+                self._drop = drop
+                self.update()
+
+    def dragLeaveEvent(self, e):
+        self._drop = None
+        self.update()
+
+    def dropEvent(self, e):
+        name, after = self._dragged(e), self._drop == "after"
+        self._drop = None
+        self.update()
+        if name:
+            e.acceptProposedAction()
+            self.dropped.emit(name, after)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._drop:                                   # insertion line where the dragged group will land
+            p = QPainter(self)
+            p.setPen(QColor(theme.ACCENT_H))
+            y = 1 if self._drop == "before" else self.height() - 2
+            p.drawLine(self.indent, y, self.width() - 8, y)
+
     def enterEvent(self, e):
         self._hover = True
         self._paint()
@@ -128,11 +191,12 @@ class Sidebar(QWidget):
     new_group = Signal(str)                # kind
     expanded_changed = Signal(str, bool)   # kind, groups shown
     group_menu = Signal(str, str, QPoint)  # kind, name, global pos
+    group_moved = Signal(str, str, str, bool)   # kind, dragged group, target group, after the target
     sync_clicked = Signal()
     sync_options = Signal()
     settings_clicked = Signal()
     log_clicked = Signal()
-    WIDE, NARROW = 232, 68
+    WIDE, NARROW = 256, 68
 
     def __init__(self, titles):
         super().__init__()
@@ -237,7 +301,8 @@ class Sidebar(QWidget):
             self.group.removeButton(it)
             it.deleteLater()
         for name, n, color in groups:
-            it = NavItem(name, "folder", tint=color, role="navsub", indent=34)
+            it = NavItem(name, "folder", tint=color, role="navsub", indent=34, drag_group=(kind, name))
+            it.dropped.connect(lambda src, after, k=kind, nme=name: self.group_moved.emit(k, src, nme, after))
             it.set_count(n)
             key = f"group:{kind}:{name}"
             it.clicked.connect(lambda _=False, k=key: self.navigate.emit(k))

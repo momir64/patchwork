@@ -15,6 +15,7 @@ PREFS_PATH = DATA_DIR / "ui.json"
 class AppState(QObject):
     changed = Signal()              # lists / favorites / posters changed
     groups_changed = Signal()
+    zoom_changed = Signal(int)      # the poster size slider is shared by every page
 
     def __init__(self):
         super().__init__()

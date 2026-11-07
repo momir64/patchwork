@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self.sidebar.navigate.connect(self.go)
         self.sidebar.new_group.connect(self.create_group)
         self.sidebar.group_menu.connect(self.group_context)
+        self.sidebar.group_moved.connect(self.move_group)
         self.sidebar.sync_clicked.connect(lambda: self.start_sync(self.state.pref("sync", DEFAULT_SYNC)))
         self.sidebar.sync_options.connect(self.sync_options)
         self.sidebar.settings_clicked.connect(self.open_settings)
@@ -165,6 +166,12 @@ class MainWindow(QMainWindow):
         self.sidebar.set_counts({k: len(self.state.libs[k].shown_items()) for k in KINDS})
 
     # ------------------------------------------------------------ groups
+    def move_group(self, kind, name, target, after):
+        self.state.groups.move(kind, name, target, after)
+        self.sidebar.set_groups(kind, [(n, len(self.state.groups.members(kind, n)), self.state.group_color(kind, n)) for n in self.state.groups.names(kind)])
+        self.sidebar.set_current(self.current_key)
+        self.collage.reload_groups()
+
     def rebuild_groups(self):
         wanted = {(k, n) for k in KINDS for n in self.state.groups.names(k)}
         for key in [g for g in self.group_pages if g not in wanted]:
