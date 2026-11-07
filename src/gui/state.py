@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, Signal
 from ..core.config import DATA_DIR, Config
 from ..core.groups import Groups
 from ..core import editions
-from ..core.library import KINDS, Library, fix_renamed_titles
+from ..core.library import KINDS, Library, migrate_names
 from .common import ThumbLoader
 
 PREFS_PATH = DATA_DIR / "ui.json"
@@ -20,7 +20,7 @@ class AppState(QObject):
         super().__init__()
         self.cfg = Config()
         self.libs = {k: Library(k) for k in KINDS}
-        fix_renamed_titles(self.libs)
+        migrate_names(self.libs)
         for lib in self.libs.values():
             editions.sweep(lib)
         self.groups = Groups()
@@ -63,7 +63,7 @@ class AppState(QObject):
     def reload(self):
         for lib in self.libs.values():
             lib.load()
-        fix_renamed_titles(self.libs)
+        migrate_names(self.libs)
         for lib in self.libs.values():
             editions.sweep(lib)
         self.groups.refresh()

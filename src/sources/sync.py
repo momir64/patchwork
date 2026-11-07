@@ -79,6 +79,7 @@ class Sync:
             self.stage(f"Fetching {name}")
             try:
                 self._merge(name, kind, fetch())
+                self.progress(1, 1)                       # sources without steps of their own (Sonarr, Radarr) finish at 100%
                 if name.startswith("Trakt"):
                     self._apply_ratings(kind)
             except Exception as e:  # one broken source must not stop the others
@@ -112,7 +113,7 @@ class Sync:
         lib, added = self.libs[kind], 0
         for e in entries:
             label = self.label(e.title)
-            if lib.is_removed(label):             # you removed it by hand: a sync must not bring it back
+            if lib.is_removed(label):             # (older data) removed by hand
                 continue
             if kind == "albums" and e.album:
                 old = lib.canonical(e.album)    # old lists had album names without artist -> upgrade them
@@ -128,7 +129,7 @@ class Sync:
         self.summary.append(f"{name}: +{added}")
 
     def _trakt_entries(self, trakt, kind):
-        entries, self._ratings = trakt.collect(kind)
+        entries, self._ratings = trakt.collect(kind, self.progress)
         return entries
 
     def _apply_ratings(self, kind):
@@ -222,11 +223,23 @@ class Sync:
 
     def _album_metadata(self):
         """Genres + country from MusicBrainz per artist (about one request per second), Last.fm tags as fallback."""
-        lib, need = self.libs["albums"], {}
+        lib, need, known = self.libs["albums"], {}, {}
         for label in lib.items:
             m = lib.meta.get(label)
-            if m.get("creators") and (self.force_meta or not m.get("mb_checked")):
-                need.setdefault(m["creators"][0], []).append(label)
+            if not m.get("creators"):
+                continue
+            artist = m["creators"][0]
+            if m.get("mb_checked") and not self.force_meta:
+                known.setdefault(artist, m)           # this artist was already looked up (via another album)
+            else:
+                need.setdefault(artist, []).append(label)
+        for artist in [a for a in need if a in known]:        # a new album of an artist we already have: copy, no request
+            src = known[artist]
+            info = {k: src[k] for k in ("genres", "countries", "languages", "mb_checked") if src.get(k)}
+            if src.get("ids", {}).get("artist_mbid"):
+                info["ids"] = {"artist_mbid": src["ids"]["artist_mbid"]}
+            for l in need.pop(artist):
+                lib.meta.update(l, info)
         if not need:
             return
         mbids = {a: next((lib.meta.get(l).get("ids", {}).get("artist_mbid") for l in ls if lib.meta.get(l).get("ids", {}).get("artist_mbid")), None)

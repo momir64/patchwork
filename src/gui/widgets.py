@@ -189,6 +189,7 @@ def button(text="", icon=None, role=None, tip=None, color=None, size=17) -> Btn:
 class Segmented(QFrame):
     """Rounded container with flat toggle buttons, exactly one active. Emits changed(value)."""
     changed = Signal(object)
+    reclicked = Signal(object)              # the already active segment was clicked again
 
     def __init__(self, options, value=None, icons_=None):
         super().__init__()
@@ -204,7 +205,7 @@ class Segmented(QFrame):
             b = Btn(text, (icons_ or {}).get(val), "seg", size=16, height=theme.HEIGHT - 6, pad=12)
             b.setCheckable(True)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.clicked.connect(lambda _=False, v=val: self.set_value(v))
+            b.clicked.connect(lambda _=False, v=val: self.reclicked.emit(v) if v == self.value else self.set_value(v))
             self.group.addButton(b)
             h.addWidget(b, 1)
             self.buttons[val] = b

@@ -1,9 +1,10 @@
-"""A Library = one media kind (shows / movies / albums): sorted txt list, favorites txt list, posters."""
+"""A Library = one media kind (shows / movies / albums): titles, favorites, hidden / removed titles (library.json), posters."""
 import re
 import shutil
 from pathlib import Path
 
 from .config import ALIASES_PATH, ensure_dirs, kind_dir
+from .jsonstore import read_json, write_json
 from .meta import Meta
 from .names import norm_key, safe_filename, sort_key
 
@@ -11,48 +12,27 @@ KINDS = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def read_lines(path: Path):
-    if not path.is_file():
-        return []
-    return [l.strip() for l in path.read_text(encoding="utf-8-sig").splitlines() if l.strip()]
-
-
-def write_sorted(path: Path, labels):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    uniq = {}
-    for l in labels:
-        uniq.setdefault(norm_key(l), l)
-    path.write_text("\n".join(sorted(uniq.values(), key=sort_key)) + "\n", encoding="utf-8")
-
-
 def load_aliases() -> dict:
-    """data/aliases.txt: 'name from Sonarr/file => name in my list' (one per line)."""
-    out = {}
-    for line in read_lines(ALIASES_PATH):
-        if "=>" in line and not line.startswith("#"):
-            a, b = line.split("=>", 1)
-            out[norm_key(a)] = b.strip()
-    return out
+    """data/aliases.json: {'name from Sonarr/file': 'name in my list'} -> {normalized source: target}."""
+    return {norm_key(a): b for a, b in read_json(ALIASES_PATH, {}).items()}
 
 
 def add_alias(source: str, target: str):
     """Remember 'source => target' so later syncs map the original name onto the renamed item."""
     if norm_key(source) == norm_key(target):
         return
-    ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines = read_lines(ALIASES_PATH)
-    lines = [l for l in lines if not (("=>" in l) and norm_key(l.split("=>")[0]) == norm_key(source))]
-    lines = [(f"{l.split('=>')[0].strip()} => {target}" if "=>" in l and not l.startswith("#") and norm_key(l.split("=>", 1)[1]) == norm_key(source) else l) for l in lines]
-    lines.append(f"{source} => {target}")
-    ALIASES_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    pairs = {a: b for a, b in read_json(ALIASES_PATH, {}).items() if norm_key(a) != norm_key(source)}
+    pairs = {a: (target if norm_key(b) == norm_key(source) else b) for a, b in pairs.items()}      # keep chains pointing at what exists
+    pairs[source] = target
+    write_json(ALIASES_PATH, pairs)
 
 
 def remove_alias(source: str):
-    """Forget 'source => ...' (the merge was undone, so that name is its own title again)."""
-    if not ALIASES_PATH.exists():
-        return
-    lines = [l for l in read_lines(ALIASES_PATH) if not ("=>" in l and norm_key(l.split("=>")[0]) == norm_key(source))]
-    ALIASES_PATH.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    """Forget the alias for `source` (that name is its own title again)."""
+    pairs = read_json(ALIASES_PATH, {})
+    kept = {a: b for a, b in pairs.items() if norm_key(a) != norm_key(source)}
+    if len(kept) != len(pairs):
+        write_json(ALIASES_PATH, kept)
 
 
 def title_from_label(kind: str, label: str) -> str:
@@ -64,16 +44,19 @@ def title_from_label(kind: str, label: str) -> str:
     return label
 
 
-def fix_renamed_titles(libs: dict):
-    """Titles you renamed or merged (they are alias targets) keep the name you chose, even after a sync."""
-    targets = {norm_key(t) for t in load_aliases().values()}
+def migrate_names(libs: dict):
+    """Older data kept a hand-chosen title as `title` + `title_locked`. It now lives in its own field, `name`."""
     for lib in libs.values():
         changed = False
         for l in lib.items:
-            if norm_key(l) in targets and not lib.meta.get(l).get("title_locked"):
-                lib.meta.set_title(l, title_from_label(lib.kind, l))
+            m = lib.meta.get(l)
+            if m.get("title_locked"):
+                if m.get("title"):
+                    m["name"] = m["title"]
+                m.pop("title_locked", None)
                 changed = True
         if changed:
+            lib.meta.dirty = True
             lib.meta.save()
 
 
@@ -82,33 +65,30 @@ class Library:
         ensure_dirs()
         self.kind = kind
         self.title = KINDS[kind]
-        self.list_path = kind_dir(kind) / "list.txt"
-        self.fav_path = kind_dir(kind) / "favorites.txt"
-        self.hidden_path = kind_dir(kind) / "hidden.txt"
-        self.removed_path = kind_dir(kind) / "removed.txt"
+        self.json_path = kind_dir(kind) / "library.json"
         self.poster_dir = kind_dir(kind) / "posters"
         self.load()
 
     # ---- persistence
     def load(self):
-        self.items = sorted(read_lines(self.list_path), key=sort_key)
+        data = read_json(self.json_path, {})
+        self.items = sorted(data.get("items", []), key=sort_key)
         self._keys = {norm_key(i): i for i in self.items}
-        self.favs = {norm_key(f) for f in read_lines(self.fav_path)}
-        self.hidden = {norm_key(f) for f in read_lines(self.hidden_path)} if self.hidden_path.exists() else set()
-        self.removed_labels = {norm_key(f): f for f in read_lines(self.removed_path)} if self.removed_path.exists() else {}
+        self.favs = {norm_key(f) for f in data.get("favorites", [])}
+        self.hidden = {norm_key(f) for f in data.get("hidden", [])}
+        self.removed_labels = {norm_key(f): f for f in data.get("removed", [])}
         self.removed = set(self.removed_labels)
         self.meta = Meta(self.kind)
         self.index_posters()
 
     def save(self):
         self.items = sorted(self.items, key=sort_key)
-        write_sorted(self.list_path, self.items)
-        fav_labels = [i for i in self.items if norm_key(i) in self.favs]
-        write_sorted(self.fav_path, fav_labels)
-        if self.removed or self.removed_path.exists():
-            write_sorted(self.removed_path, [self.removed_labels[k] for k in self.removed if k in self.removed_labels])
-        if self.hidden or self.hidden_path.exists():
-            write_sorted(self.hidden_path, [i for i in self.items if norm_key(i) in self.hidden])
+        write_json(self.json_path, {
+            "items": self.items,
+            "favorites": [i for i in self.items if norm_key(i) in self.favs],
+            "hidden": [i for i in self.items if norm_key(i) in self.hidden],
+            "removed": sorted(self.removed_labels[k] for k in self.removed if k in self.removed_labels),
+        })
         self.meta.save()
 
     def index_posters(self):
@@ -164,10 +144,16 @@ class Library:
         (self.favs.add if value else self.favs.discard)(norm_key(label))
 
     def forget(self, label: str):
-        """The user removed this title: take it out AND remember that, so later syncs do not bring it back."""
-        self.removed_labels[norm_key(label)] = label
-        self.removed.add(norm_key(label))
+        """The user removed this title: it is deleted completely (list entry, details, poster file). Nothing is remembered,
+        so a later sync may add it again - hide a title instead to keep it out of sight."""
+        p = self.poster(label)
         self.remove(label)
+        self._posters.pop(norm_key(label), None)
+        if p:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     def unforget(self, label: str):
         self.removed.discard(norm_key(label))
@@ -179,14 +165,18 @@ class Library:
     def set_hidden(self, label: str, value: bool):
         (self.hidden.add if value else self.hidden.discard)(norm_key(label))
 
-    def rename(self, old: str, new: str, alias: bool = False):
-        """alias=True: also remember the old name, so syncs don't re-add it as a duplicate."""
+    def name(self, label: str) -> str:
+        """What the app shows for an item: the name you chose, else what the source calls it, else the plain label.
+        (The label itself never changes: it is the item's permanent handle for posters, groups and syncs.)"""
+        m = self.meta.get(label)
+        return m.get("name") or m.get("title") or title_from_label(self.kind, label)
+
+    def rename(self, old: str, new: str):
+        """Change the handle itself (only for upgrading old data, e.g. album names that had no artist yet)."""
         new = new.strip()
         ok, nk = norm_key(old), norm_key(new)
         if not new or (nk != ok and nk in self._keys):
             return False
-        if alias:
-            add_alias(old, new)
         was_fav, was_hidden = ok in self.favs, ok in self.hidden
         p = self.poster(old)
         self.meta.rename(old, new)
@@ -194,8 +184,6 @@ class Library:
         self.add(new)
         self.set_fav(new, was_fav)
         self.set_hidden(new, was_hidden)
-        if alias:                                             # a rename by hand: the shown title follows it
-            self.meta.set_title(new, title_from_label(self.kind, new))
         if p:
             dest = p.with_name(safe_filename(new) + p.suffix)
             if dest != p:
@@ -218,5 +206,29 @@ class Library:
         self._posters[norm_key(label)] = dest
         return dest
 
+    _ok_cache: dict = {}
+
+    def has_poster(self, label: str) -> bool:
+        """A poster file that really is a readable image (an empty or broken file counts as missing)."""
+        p = self.poster(label)
+        if not p:
+            return False
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        key = (str(p), st.st_mtime_ns, st.st_size)
+        ok = Library._ok_cache.get(key)
+        if ok is None:
+            try:
+                from PIL import Image
+                with Image.open(p) as im:
+                    im.verify()
+                ok = st.st_size > 0
+            except Exception:
+                ok = False
+            Library._ok_cache[key] = ok
+        return ok
+
     def missing_posters(self):
-        return [i for i in self.items if not self.poster(i)]
+        return [i for i in self.items if not self.has_poster(i)]

@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(720, 480)
         self.state = AppState()
         self.log_lines, self.sync_job, self.current_key, self.last_status, self._pct = [], None, None, "", -1
+        self.log_dialog = self.settings_dialog = None
         self.bridge = LogBridge()
         self.bridge.message.connect(self.add_log)
         self.bridge.stage.connect(self.on_stage)
@@ -81,7 +82,7 @@ class MainWindow(QMainWindow):
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.set_expanded(self.state.pref("groups_open", {}))
         self.sidebar.expanded_changed.connect(lambda k, on: self.state.set_pref("groups_open", {**self.state.pref("groups_open", {}), k: on}))
-        self.sidebar.log_clicked.connect(lambda: LogDialog("\n".join(self.log_lines), self).exec())
+        self.sidebar.log_clicked.connect(self.show_log)
 
         body = QWidget()
         h = QHBoxLayout(body)
@@ -141,7 +142,10 @@ class MainWindow(QMainWindow):
         shown = self.page_for.get(self.current_key)
         for p in self.all_media_pages():
             if p is shown:
-                p.reload()
+                if getattr(p, "_self_updated", False):
+                    p._self_updated = False               # it just updated itself (e.g. a star click): no full reload
+                else:
+                    p.reload()
                 self._stale.discard(p)
             else:
                 self._stale.add(p)
@@ -228,8 +232,20 @@ class MainWindow(QMainWindow):
             self.set_group_color(kind, name, c.name())
 
     # ------------------------------------------------------------ status / log
+    def show_log(self):
+        if self.log_dialog is not None:
+            self.log_dialog.raise_()
+            self.log_dialog.activateWindow()
+            return
+        self.log_dialog = LogDialog("\n".join(self.log_lines), self)
+        self.log_dialog.finished.connect(lambda *_: setattr(self, "log_dialog", None))
+        self.log_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.log_dialog.show()
+
     def add_log(self, text):
         self.log_lines.append(text)
+        if getattr(self, "log_dialog", None):               # the log window is open: show the line live
+            self.log_dialog.append(text)
         self.last_status = text
         if self.sync_job:                                # while syncing the status shows the step and its percentage
             return
@@ -318,11 +334,21 @@ class MainWindow(QMainWindow):
         self.add_log(text)
 
     def open_settings(self):
-        dlg = SettingsDialog(self.state.cfg, self)
-        if dlg.exec():
-            self.add_log("Settings saved")
-        if dlg.imported:
-            self.sync_finished("Data imported")
+        if getattr(self, "settings_dialog", None) is not None:
+            self.settings_dialog.raise_()
+            self.settings_dialog.activateWindow()
+            return
+        dlg = self.settings_dialog = SettingsDialog(self.state.cfg, self)
+
+        def closed(result):
+            self.settings_dialog = None
+            if result:
+                self.add_log("Settings saved")
+            if dlg.imported:
+                self.sync_finished("Data imported")
+            dlg.deleteLater()
+        dlg.finished.connect(closed)
+        dlg.show()
 
     # ------------------------------------------------------------ window behaviour
     def showEvent(self, e):

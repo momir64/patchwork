@@ -70,8 +70,10 @@ class Meta:
         for k, v in (new or {}).items():
             if v in (None, "", [], {}):
                 continue
+            if k == "name" and cur.get("name"):
+                continue                         # the name you chose is never replaced by an import
             if k == "title" and cur.get("title_locked"):
-                continue                         # you renamed it: the source's own title must not win again
+                continue                         # (older data) a locked title
             if k == "languages":
                 v = [norm_language(x) for x in as_list(v)]
             if k in LIST_FIELDS:
@@ -93,14 +95,17 @@ class Meta:
             self._index[norm_key(new)] = new
             self.dirty = True
 
-    def set_title(self, label, title):
-        """A title chosen by hand: shown everywhere and kept across syncs."""
+    def set_name(self, label, name):
+        """The name you chose for an item. Syncs only ever touch `title` (what the source calls it), never this."""
         key = self._index.get(norm_key(label))
         if key is None:
             key = label
             self._index[norm_key(label)] = label
             self.by_label[label] = {}
-        self.by_label[key].update(title=title, title_locked=True)
+        if name:
+            self.by_label[key]["name"] = name
+        else:
+            self.by_label[key].pop("name", None)
         self.dirty = True
 
     def remove(self, label):
@@ -123,9 +128,10 @@ class Meta:
             c.update(set(self.values(l, facet)))
         return c
 
-    def matches(self, label, text) -> bool:
+    def matches(self, label, text, by_label=True) -> bool:
+        """Text in the title (when by_label), or in year / studio / genres / countries / languages / creators."""
         text = text.casefold()
-        if text in label.casefold():
+        if by_label and text in label.casefold():
             return True
         m = self.get(label)
         hay = [str(m.get("year", "")), str(m.get("studio", ""))] + [x for f in LIST_FIELDS for x in as_list(m.get(f))]

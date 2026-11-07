@@ -56,6 +56,8 @@ def fetch_radarr(cfg) -> list:
     for m in arr.get("movie"):
         if cfg.flag("RADARR_ONLY_DOWNLOADED") and not m.get("hasFile"):
             continue
+        if cfg.flag("RADARR_ONLY_UNMONITORED") and m.get("monitored"):
+            continue                                  # still monitored in Radarr: added once you unmonitor it
         meta = dict(title=m["title"], year=m.get("year"), genres=m.get("genres"),
                     languages=(m.get("originalLanguage") or {}).get("name"), studio=m.get("studio"),
                     overview=m.get("overview"), rating=((m.get("ratings") or {}).get("tmdb") or {}).get("value"),

@@ -239,11 +239,11 @@ class Polisher(QObject):
 class Modal(QDialog):
     """Frameless rounded dialog with its own title bar and a soft shadow. Put content into `self.body`."""
 
-    def __init__(self, parent, title, width=480, resizable=True):
+    def __init__(self, parent, title, width=480, resizable=True, modal=True):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setModal(True)
+        self.setModal(modal)                            # modal=False: the main window stays usable while this is open
         self.setWindowTitle(title)
         self._placed = False
         outer = QVBoxLayout(self)

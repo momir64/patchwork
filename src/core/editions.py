@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 
 from .config import kind_dir
+from .jsonstore import read_json, write_json
 from .names import norm_key
 
 WORDS = (r"deluxe|remaster(?:ed)?|edition|expanded|anniversary|version|bonus|special|explicit|clean|reissue|re-issue|"
@@ -37,21 +38,85 @@ def set_id(group) -> str:
     return "|".join(sorted(norm_key(l) for l in group))
 
 
+def _dup_file(kind):
+    return kind_dir(kind) / "duplicates.json"
+
+
+_STATE = {}                                         # kind -> (file mtime, state): the file is only re-read when it changed
+
+
+def _dup_state(kind) -> dict:
+    f = _dup_file(kind)
+    try:
+        mt = f.stat().st_mtime_ns
+    except OSError:
+        mt = None
+    hit = _STATE.get(kind)
+    if hit and hit[0] == mt:
+        d = hit[1]
+    else:
+        d = read_json(f, {})
+        _STATE[kind] = (mt, d)
+    return {"separate": list(d.get("separate", [])), "hidden": list(d.get("hidden", [])), "manual": list(d.get("manual", [])),
+            "apart": list(d.get("apart", []))}
+
+
 def separate_ids(kind: str) -> set:
     """Sets the user marked as 'not duplicates', so they are not offered again."""
-    p = kind_dir(kind) / "not_duplicates.txt"
-    return set(p.read_text(encoding="utf-8").splitlines()) if p.exists() else set()
+    return set(_dup_state(kind)["separate"])
 
 
 def mark_separate(kind: str, group):
-    p = kind_dir(kind) / "not_duplicates.txt"
-    ids = separate_ids(kind) | {set_id(group)}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(sorted(ids)) + "\n", encoding="utf-8")
+    d = _dup_state(kind)
+    d["separate"] = sorted(set(d["separate"]) | {set_id(group)})
+    write_json(_dup_file(kind), d)
 
 
-def groups(labels, kind="albums") -> list:
-    """[[label, ...], ...] - only the titles that exist more than once (and were not marked as different)."""
+ID_KEYS = {"shows": ("tmdb", "tvdb", "imdb", "trakt"), "movies": ("tmdb", "imdb", "trakt"), "albums": ("mbid",)}
+
+
+def _join(found, extra):
+    """Merge overlapping sets (union-find over the labels): [[a, b], [b, c]] -> [[a, b, c]]."""
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for g in list(found) + list(extra):
+        for l in g[1:]:
+            parent[find(l)] = find(g[0])
+    out = defaultdict(list)
+    for l in parent:
+        out[find(l)].append(l)
+    return [sorted(v, key=str.casefold) for v in out.values() if len(v) > 1]
+
+
+def manual_sets(kind) -> list:
+    return [list(g) for g in _dup_state(kind)["manual"]]
+
+
+def mark_duplicates(kind: str, labels):
+    """You say these are the same title: they show up in the duplicates dialog like any detected set."""
+    d = _dup_state(kind)
+    d["manual"] = d["manual"] + [sorted(set(labels))]
+    d["separate"] = [i for i in d["separate"] if i != set_id(labels)]            # an earlier 'not duplicates' no longer applies
+    write_json(_dup_file(kind), d)
+
+
+def mark_apart(kind: str, group, apart):
+    """In this exact set, the `apart` titles are not duplicates of the rest (the others stay a duplicate set)."""
+    d = _dup_state(kind)
+    sid = set_id(group)
+    d["apart"] = [r for r in d["apart"] if r["set"] != sid] + [{"set": sid, "apart": sorted(apart)}]
+    write_json(_dup_file(kind), d)
+
+
+def groups(labels, kind="albums", lib=None) -> list:
+    """[[label, ...], ...] - only the titles that exist more than once (and were not marked as different).
+    With `lib`, titles that share an id (TMDB / IMDb / TVDB / Trakt, or the album's MusicBrainz id) and sets you marked by hand count too."""
     by = defaultdict(list)
     if kind == "albums":
         for l in labels:
@@ -70,6 +135,21 @@ def groups(labels, kind="albums") -> list:
                 found.append(v)
             else:
                 found += [x for t, x in tagged.items() if len(x) > 1]
+    if lib is not None:
+        have = {norm_key(l): l for l in labels}
+        extra = [[have[k] for k in dict.fromkeys(norm_key(l) for l in g) if k in have] for g in manual_sets(kind)]
+        ids = defaultdict(list)
+        for l in labels:
+            known = lib.meta.get(l).get("ids", {})
+            for key in ID_KEYS.get(kind, ()):
+                if known.get(key):
+                    ids[(key, str(known[key]))].append(l)
+        extra += [v for v in ids.values() if len(v) > 1]
+        found = _join(found, [g for g in extra if len(g) > 1])
+    rules = {r["set"]: {norm_key(x) for x in r["apart"]} for r in _dup_state(kind)["apart"]}
+    if rules:
+        found = [[l for l in g if norm_key(l) not in rules.get(set_id(g), ())] for g in found]
+        found = [g for g in found if len(g) > 1]
     skip = separate_ids(kind)
     return [g for g in found if set_id(g) not in skip]
 
@@ -86,21 +166,14 @@ def simplest(group, kind="albums") -> str:
 
 
 # ---- titles hidden because they are a duplicate; they come back as soon as they stop being one
-def _hidden_file(kind):
-    return kind_dir(kind) / "duplicate_hidden.txt"
-
-
 def load_dup_hidden(kind) -> set:
-    p = _hidden_file(kind)
-    return {l.strip() for l in p.read_text(encoding="utf-8").splitlines() if l.strip()} if p.exists() else set()
+    return set(_dup_state(kind)["hidden"])
 
 
 def save_dup_hidden(kind, labels):
-    p = _hidden_file(kind)
-    if labels:
-        p.write_text("\n".join(sorted(labels)) + "\n", encoding="utf-8")
-    elif p.exists():
-        p.unlink()
+    d = _dup_state(kind)
+    d["hidden"] = sorted(labels)
+    write_json(_dup_file(kind), d)
 
 
 def sweep(lib) -> bool:
@@ -110,7 +183,7 @@ def sweep(lib) -> bool:
     rec = load_dup_hidden(kind)
     if not rec:
         return False
-    live = {norm_key(l) for g in groups(lib.items, kind) for l in g}
+    live = {norm_key(l) for g in groups(lib.items, kind, lib) for l in g}
     keep, changed = set(), False
     for l in rec:
         if not lib.has(l) or not lib.is_hidden(l):

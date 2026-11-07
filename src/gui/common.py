@@ -43,7 +43,10 @@ class _Task(QRunnable):
                 img = pil_to_qimage(im)
         except Exception:
             pass
-        self.loader._ready.emit(self.key, img)
+        try:
+            self.loader._ready.emit(self.key, img)
+        except RuntimeError:
+            pass                                  # the window was closed while this thumbnail was loading
 
 
 class ThumbLoader(QObject):
@@ -53,7 +56,7 @@ class ThumbLoader(QObject):
     def __init__(self, limit=700):
         super().__init__()
         self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(4)
+        self.pool.setMaxThreadCount(6)
         self.cache, self.pending, self.limit = OrderedDict(), set(), limit
         self._ready.connect(self._store)
 

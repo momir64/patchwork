@@ -1,8 +1,8 @@
 """Dialogs: granular Sync, Settings (.env editor + data export/import) and the activity log."""
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
                                QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -67,8 +67,8 @@ SOURCE_INFO = {  # key -> (title, description, config check)
     "lastfm": ("Last.fm", "Your top albums", lambda c: c.lastfm_ready),
 }
 STEP_INFO = {
-    "titles": ("Add new titles", "Never deletes anything"),
-    "posters": ("Download missing posters", "Only titles without one"),
+    "titles": ("Add new items", "Never deletes anything"),
+    "posters": ("Download missing posters", "Only items without one"),
     "metadata": ("Fetch missing metadata", "Albums: MusicBrainz, ~1 artist/s"),
 }
 KIND_NAMES = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
@@ -131,21 +131,22 @@ class SyncDialog(Modal):
 # ====================================================================== settings
 SECTIONS = (
     ("Sonarr", "Shows library", "sonarr", ("SONARR_URL", "SONARR_API_KEY", "SONARR_ONLY_DOWNLOADED")),
-    ("Radarr", "Movies library", "radarr", ("RADARR_URL", "RADARR_API_KEY", "RADARR_ONLY_DOWNLOADED")),
+    ("Radarr", "Movies library", "radarr", ("RADARR_URL", "RADARR_API_KEY", "RADARR_ONLY_DOWNLOADED", "RADARR_ONLY_UNMONITORED")),
     ("Trakt", "Watch history of a public profile", "trakt", ("TRAKT_CLIENT_ID", "TRAKT_USER", "TRAKT_FAV_MIN_RATING", "TRAKT_SYNC_FAVORITES")),
     ("Last.fm", "Your played albums", "lastfm", ("LASTFM_API_KEY", "LASTFM_USER", "LASTFM_SOURCE", "LASTFM_PERIOD", "LASTFM_LIMIT")),
     ("TMDB", "Posters and details for shows and movies", None, ("TMDB_API_KEY",)),
 )
 CHECKS = {"SONARR_ONLY_DOWNLOADED": "Skip shows without files", "RADARR_ONLY_DOWNLOADED": "Skip movies without files",
+          "RADARR_ONLY_UNMONITORED": "Add movies only after they are unmonitored",
           "TRAKT_SYNC_FAVORITES": "Let Trakt sync change my favorites"}
 SOURCES_LF = (("Top albums", "top"), ("Listening history", "recent"))
 PERIODS = (("All time", "overall"), ("Last 7 days", "7day"), ("Last month", "1month"), ("Last 3 months", "3month"),
            ("Last 6 months", "6month"), ("Last 12 months", "12month"))
 HINTS = {"LASTFM_LIMIT": "",
-         "TRAKT_SYNC_FAVORITES": "Off by default. When on, Trakt titles rated at or above the value above become favorites on sync."}
+         "TRAKT_SYNC_FAVORITES": "Off by default. When on, Trakt items rated at or above the value above become favorites on sync."}
 LIMIT_HINTS = {"top": "The most played of your top albums for the period. 0 imports all.",
                "recent": "Plays in your listening history are counted per album over the period; the most played are kept. 0 imports all."}
-NICE = {"SONARR_URL": "Address", "SONARR_API_KEY": "API key", "SONARR_ONLY_DOWNLOADED": "Only downloaded", "RADARR_ONLY_DOWNLOADED": "Only downloaded", "LASTFM_SOURCE": "Albums from",
+NICE = {"SONARR_URL": "Address", "SONARR_API_KEY": "API key", "SONARR_ONLY_DOWNLOADED": "Only downloaded", "RADARR_ONLY_DOWNLOADED": "Only downloaded", "RADARR_ONLY_UNMONITORED": "Only unmonitored", "LASTFM_SOURCE": "Albums from",
         "RADARR_URL": "Address", "RADARR_API_KEY": "API key", "TRAKT_CLIENT_ID": "Client ID", "TRAKT_USER": "Username",
         "TRAKT_SYNC_FAVORITES": "Trakt sync", "TRAKT_FAV_MIN_RATING": "Favorite if rated ≥", "LASTFM_API_KEY": "API key",
         "LASTFM_USER": "Username", "LASTFM_PERIOD": "Period", "LASTFM_LIMIT": "Albums to import", "TMDB_API_KEY": "API key"}
@@ -156,7 +157,7 @@ class SettingsDialog(Modal):
     msg = Signal(str)
 
     def __init__(self, cfg, parent=None):
-        super().__init__(parent, "Settings", 800)
+        super().__init__(parent, "Settings", 800, modal=False)
         self.cfg, self.fields, self.jobs, self.imported = cfg, {}, [], False
         self.nav, self.stack = QListWidget(), QStackedWidget()
         self.nav.setObjectName("settingsnav")
@@ -468,40 +469,75 @@ class SettingsDialog(Modal):
 
 # ====================================================================== log
 class LogDialog(Modal):
+    """The activity log. New lines are appended live (see `append`) and the view follows them unless you scrolled up."""
+
     def __init__(self, text, parent=None):
-        super().__init__(parent, "Activity log", 780)
-        box = QPlainTextEdit(text or "Nothing yet.")
-        box.setReadOnly(True)
-        box.setStyleSheet("font-family: Consolas, 'Cascadia Mono', monospace; font-size: 12px;")
-        self.body.addWidget(box, 1)
+        super().__init__(parent, "Activity log", 780, modal=False)
+        self.box = QPlainTextEdit(text or "Nothing yet.")
+        self.box.setReadOnly(True)
+        self.box.setMaximumBlockCount(5000)
+        self.box.setStyleSheet("font-family: Consolas, 'Cascadia Mono', monospace; font-size: 12px;")
+        self.body.addWidget(self.box, 1)
         self.footer("Close", None, self.accept, cancel_text=None)
         self.resize(820, 520)
-        box.verticalScrollBar().setValue(box.verticalScrollBar().maximum())
+        self._empty = not text
+        QTimer.singleShot(0, self.to_end)
+
+    def to_end(self):
+        bar = self.box.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def append(self, line):
+        bar = self.box.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4                 # at the bottom: keep following; scrolled up: stay put
+        if self._empty:
+            self.box.clear()
+            self._empty = False
+        self.box.appendPlainText(line)
+        if follow:
+            self.to_end()
 
 
 # ====================================================================== duplicate album editions
 class EditionTile(QWidget):
-    """One edition of an album: its cover, with a Keep / Remove badge. Click to make it the one that stays."""
+    """One copy of a title: its cover with a state badge (Keep / Hide / Different). Click the cover to keep this one;
+    click the chip on the cover to say it is a different title altogether."""
     clicked = Signal(object)
+    apart_toggled = Signal(object)
     W = 136
 
-    def __init__(self, text, plays, fav, path, thumbs, cover_h=136):
+    def __init__(self, text, plays, path, thumbs, cover_h=136, noun="title", show_name=True, lines=2, plays_row=True):
         super().__init__()
-        self.text, self.plays, self.fav, self.path, self.thumbs, self.COVER = text, plays, fav, path, thumbs, cover_h
-        self.keep = self.hover = False
-        self.setFixedSize(self.W, self.COVER + 56)
+        self.text, self.plays, self.path, self.thumbs, self.COVER = text, plays, path, thumbs, cover_h
+        self.noun, self.show_name = noun, show_name
+        self.keep = self.hover = self.apart = False
+        self.state = "hide"                                  # keep | hide | apart (set by the card that holds the tiles)
+        self.lines = lines
+        self.setFixedSize(self.W, self.COVER + (4 + 15 * lines if show_name else 0) + (18 if plays_row else 0) + (0 if (show_name or plays_row) else 0))
+        self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(text)
         if path:
             thumbs.loaded.connect(lambda key: self.update() if key == str(path) else None)
 
+    def chip_rect(self):
+        return QRectF(6, self.COVER - 28, self.W - 12, 22)
+
     def set_keep(self, on):
         self.keep = on
         self.update()
 
+    def set_apart(self, on):
+        self.apart = on
+        self.update()
+
+    def set_state(self, state):
+        self.state = state
+        self.update()
+
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self)
+            (self.apart_toggled if self.chip_rect().contains(e.position()) else self.clicked).emit(self)
 
     def enterEvent(self, e):
         self.hover = True
@@ -519,93 +555,156 @@ class EditionTile(QWidget):
         shape = QPainterPath()
         shape.addRoundedRect(cover, 8, 8)
         pm = self.thumbs.get(self.path) if self.path else None
+        kept, apart = self.state == "keep", self.state == "apart"
         p.save()
         p.setClipPath(shape)
         p.fillRect(cover, QColor(theme.SURFACE2))
-        p.setOpacity(1.0 if self.keep or self.hover else 0.45)       # the ones that will be removed fade back
+        p.setOpacity(0.45 if (self.state == "hide" and not self.hover) else 1.0)       # the ones that will be hidden fade back
         if pm is not None and not pm.isNull():
             sc = max(cover.width() / pm.width(), cover.height() / pm.height())
             w, h = pm.width() * sc, pm.height() * sc
             p.drawPixmap(QRectF((cover.width() - w) / 2, (cover.height() - h) / 2, w, h), pm, QRectF(pm.rect()))
         p.restore()
-        if self.keep:
+        if kept:
             p.setPen(QPen(QColor(theme.ACCENT), 3))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(cover.adjusted(1.5, 1.5, -1.5, -1.5), 7, 7)
-        badge = QRectF(8, 8, 70 if self.keep else 68, 22)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(theme.ACCENT) if self.keep else QColor(8, 10, 14, 215))
-        p.drawRoundedRect(badge, 11, 11)
-        p.setPen(QColor("white") if self.keep else QColor(theme.MUTED))
         f = p.font()
         f.setPixelSize(12)
         f.setBold(True)
         p.setFont(f)
-        p.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), "✓ Keep" if self.keep else "Hide")
-        f.setBold(self.keep)
-        p.setFont(f)
-        p.setPen(QColor(theme.TEXT if self.keep else theme.MUTED))
-        p.drawText(QRectF(2, self.COVER + 6, self.W - 4, 32), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop) | int(Qt.TextFlag.TextWordWrap),
-                   QFontMetrics(f).elidedText(self.text, Qt.TextElideMode.ElideRight, (self.W - 4) * 2 - 24))
+        # state badge, top left
+        text = "✓ Keep" if kept else ("Different" if apart else "Hide")
+        badge = QRectF(8, 8, QFontMetrics(f).horizontalAdvance(text) + 22, 22)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(theme.ACCENT) if kept else QColor(8, 10, 14, 215))
+        p.drawRoundedRect(badge, 11, 11)
+        p.setPen(QColor("white") if kept else QColor(theme.MUTED))
+        p.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), text)
+        # the "different <title>" chip, bottom of the cover
+        chip = self.chip_rect()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(theme.ACCENT_SOFT) if self.apart else QColor(8, 10, 14, 205))
+        p.drawRoundedRect(chip, 11, 11)
+        p.setPen(QColor(theme.ACCENT_H) if self.apart else QColor(theme.MUTED))
         f.setBold(False)
+        f.setPixelSize(11)
         p.setFont(f)
-        p.setPen(QColor(theme.GOLD if self.fav else theme.DIM))
-        p.drawText(QRectF(2, self.COVER + 38, self.W - 4, 16), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter),
-                   ("★ " if self.fav else "") + (f"{self.plays} plays" if self.plays else ("favorite" if self.fav else "")))
+        p.drawText(chip, int(Qt.AlignmentFlag.AlignCenter), ("✓ " if self.apart else "") + f"Different {self.noun}")
+        # caption: the name (only when there is no name box above to read it from) and the play count
+        f.setPixelSize(12)
+        y = self.COVER + 4
+        if self.show_name:
+            f.setBold(kept)
+            p.setFont(f)
+            p.setPen(QColor(theme.TEXT if kept or apart else theme.MUTED))
+            p.drawText(QRectF(2, y, self.W - 4, 15 * self.lines), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop) | int(Qt.TextFlag.TextWordWrap),
+                       QFontMetrics(f).elidedText(self.text, Qt.TextElideMode.ElideRight, (self.W - 4) * self.lines - 24))
+            y += 15 * self.lines + 2
+        if self.plays:
+            f.setBold(False)
+            p.setFont(f)
+            p.setPen(QColor(theme.DIM))
+            p.drawText(QRectF(2, y, self.W - 4, 16), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter), f"{self.plays} plays")
 
 
 class EditionSet(QWidget):
-    """The copies of one title side by side (max 3 per row); exactly one is kept, by default the first (left) one.
-    "Keep all" marks them as different titles instead."""
-    GAP, PAD, COLS, BAR = 12, 10, 3, 30
+    """The copies of one title side by side (max 3 per row). Click a cover to keep that one (the others get hidden); the chip on
+    a cover says it is a different title, not a duplicate. When fewer than two copies are left as duplicates, the set is
+    "not duplicates" altogether. When the names differ a lot, a Name box picks what the kept title is called."""
+    GAP, VGAP, PAD, COLS, NAME = 12, 8, 10, 3, 32
 
-    def __init__(self, labels, plays, lib, thumbs, keep, cover_h, poster=None, fav=None,
-                 different="Not duplicates, don't merge", tip=None):
+    def __init__(self, labels, plays, lib, thumbs, keep, cover_h, poster=None, name_choice=False, noun="title", default_name=None):
         super().__init__()
-        poster, fav = poster or lib.poster, fav or lib.is_fav
+        poster = poster or lib.poster
         self.setObjectName("editionset")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"QWidget#editionset {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 10px; }}")
-        self.tiles = []
+        self.tiles, self._name_touched, self.default_name = [], False, default_name
+        ordered = [keep] + sorted((l for l in labels if l != keep), key=str.casefold)
         grid = QGridLayout(self)
         grid.setContentsMargins(self.PAD, self.PAD, self.PAD, self.PAD)
-        grid.setSpacing(self.GAP)
-        ordered = [keep] + sorted((l for l in labels if l != keep), key=str.casefold)
+        grid.setHorizontalSpacing(self.GAP)
+        grid.setVerticalSpacing(self.VGAP)
+        f12 = QFont()
+        f12.setPixelSize(12)
+        f12.setBold(True)
+        fm = QFontMetrics(f12)
+        lines = 1 if all(fm.horizontalAdvance(l) <= EditionTile.W - 6 for l in ordered) else 2
+        plays_row = any(plays(l) for l in ordered)
         for i, l in enumerate(ordered):
-            t = EditionTile(l, plays(l), fav(l), poster(l), thumbs, cover_h)
+            t = EditionTile(l, plays(l), poster(l), thumbs, cover_h, noun, show_name=not name_choice, lines=lines, plays_row=plays_row)
             t.clicked.connect(self.choose)
+            t.apart_toggled.connect(self.toggle_apart)
             t.set_keep(i == 0)
             self.tiles.append(t)
             grid.addWidget(t, i // self.COLS, i % self.COLS)
         n = len(self.tiles)
         cols, rows = min(n, self.COLS), -(-n // self.COLS)
-        self.different = QCheckBox(different)
-        self.different.setToolTip(tip or "Tick this if these are really different titles (for example the UK and US versions of a show).\nAll of them stay in your list and this pair is not offered again.")
-        self.different.toggled.connect(self._different)
-        grid.addWidget(self.different, rows, 0, 1, cols)
-        grid.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.name_box = None
+        if name_choice:
+            self.name_box = QComboBox()
+            for l in ordered:
+                self.name_box.addItem(l)
+            if default_name:
+                self.name_box.setCurrentText(default_name)               # the simplest name, whichever cover is kept
+            self.name_box.activated.connect(lambda _: setattr(self, "_name_touched", True))
+            nr = QWidget()
+            nh = QHBoxLayout(nr)
+            nh.setContentsMargins(0, 0, 0, 0)
+            nh.addWidget(label("Name:", "muted"))
+            nh.addWidget(self.name_box, 1)
+            grid.addWidget(nr, rows, 0, 1, cols)
+        grid.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.min_w = 2 * self.PAD + cols * EditionTile.W + (cols - 1) * self.GAP
         self.setMinimumWidth(self.min_w)
-        self.setFixedHeight(2 * self.PAD + rows * (cover_h + 56) + rows * self.GAP + self.BAR)
+        self.setFixedHeight(2 * self.PAD + rows * self.tiles[0].height() + (rows - 1) * self.VGAP
+                            + ((self.VGAP + self.NAME) if name_choice else 0))
+        self._sync()
+
+    # ---- state
+    def _active(self):
+        return [t for t in self.tiles if not t.apart]
+
+    def separate(self):
+        """Fewer than two copies left as duplicates of each other: nothing to merge."""
+        return len(self._active()) < 2
+
+    def _sync(self):
+        sep = self.separate()
+        for t in self.tiles:
+            t.set_state("apart" if (sep or t.apart) else ("keep" if t.keep else "hide"))
 
     def choose(self, tile):
-        self.different.setChecked(False)
+        """Keep this one: every copy is a duplicate again, and the others are hidden."""
         for t in self.tiles:
+            t.apart = False
             t.set_keep(t is tile)
+        self._sync()
 
-    def _different(self, on):
-        if on:
-            self._before = next((t for t in self.tiles if t.keep), self.tiles[0])      # remembered for when it is unticked
-            for t in self.tiles:
-                t.set_keep(True)
-        else:
-            self.choose(getattr(self, "_before", self.tiles[0]))
+    def toggle_apart(self, tile):
+        tile.set_apart(not tile.apart)
+        if tile.apart and tile.keep:
+            tile.set_keep(False)
+            rest = self._active()
+            if rest:
+                rest[0].set_keep(True)
+        elif not tile.apart and not any(t.keep and not t.apart for t in self.tiles):
+            tile.set_keep(True)
+        self._sync()
 
+    # ---- result
     def keep(self):
-        """The label that stays, or None when the user marked the set as different titles."""
-        if self.different.isChecked():
+        """The label that stays, or None when the set is not a duplicate set."""
+        if self.separate():
             return None
-        return next(t.text for t in self.tiles if t.keep)
+        return next(t.text for t in self.tiles if t.keep and not t.apart)
+
+    def apart_labels(self):
+        return [] if self.separate() else [t.text for t in self.tiles if t.apart]
+
+    def chosen_name(self):
+        return self.name_box.currentText() if self.name_box else self.default_name
 
 
 NOUNS = {"albums": "album", "shows": "show", "movies": "movie"}
@@ -649,23 +748,25 @@ class DuplicatesDialog(Modal):
 
     def __init__(self, state, kind="albums", parent=None):
         noun = NOUNS[kind]
-        super().__init__(parent, "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s", 820)
-        self.state, self.kind, self.lib = state, kind, state.libs[kind]
+        lib = state.libs[kind]
+        sets = [g for g in editions.groups(lib.items, kind, lib)
+                if sum(not lib.is_hidden(l) for l in g) != 1]            # one shown, rest hidden = already resolved
+        super().__init__(parent, "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s", 820 if sets else 340)
+        self.state, self.kind, self.lib, self.sets = state, kind, lib, sets
         plays = lambda l: self.lib.meta.get(l).get("playcount", 0) or 0
-        self.sets = [g for g in editions.groups(self.lib.items, kind)
-                     if sum(not self.lib.is_hidden(l) for l in g) != 1]      # one shown, rest hidden = already resolved
         self.choices, self.changed = [], 0
         if not self.sets:
             self.body.addWidget(label(f"No duplicate {noun}s found.", "muted"))
             self.footer("Close", None, cancel_text=None)
             return
-        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once. Click the cover to keep; the others are hidden.", "muted", wrap=True))
+        self.body.addWidget(label(f"{len(self.sets)} {noun}s exist more than once (same name, same id, or marked by you). Click a cover to keep it and hide the others, or mark one as a different " + noun + ".", "muted", wrap=True))
         cover_h = EditionTile.W if kind == "albums" else int(EditionTile.W * 1.5)
         grid = AdaptiveGrid()
         for g in self.sets:
             shown = [l for l in g if not self.lib.is_hidden(l)]
             keep = shown[0] if len(shown) == 1 else editions.keeper(g, self.lib.is_fav, plays, self.lib.poster)
-            es = EditionSet(g, plays, self.lib, state.thumbs, keep, cover_h)
+            es = EditionSet(g, plays, self.lib, state.thumbs, keep, cover_h, name_choice=self._names_differ(g), noun=noun,
+                            default_name=editions.simplest(g, kind))
             self.choices.append(es)
             grid.add(es)
         inner = QWidget()
@@ -682,6 +783,11 @@ class DuplicatesDialog(Modal):
         self.footer("Apply", "check", self.merge)
         self.resize(1180, 700)
 
+    def _names_differ(self, g):
+        """True when the titles are not just one name with a year / edition tag (so the name is worth choosing)."""
+        key = editions.base_key if self.kind == "albums" else editions.video_key
+        return len({key(l) for l in g}) > 1
+
     def merge(self):
         """The picked title is shown, the rest of its set is hidden. Nothing is deleted or renamed."""
         lib, kind = self.lib, self.kind
@@ -695,13 +801,20 @@ class DuplicatesDialog(Modal):
                 editions.mark_separate(kind, g)
                 self.changed += 1
                 continue
+            apart = grp.apart_labels()
+            if apart:                                             # not duplicates of the others: shown, and left alone from now on
+                editions.mark_apart(kind, g, apart)
             for l in g:
-                want = l != chosen
+                want = l != chosen and l not in apart
                 if lib.is_hidden(l) != want:
                     lib.set_hidden(l, want)
                     self.changed += 1
                 (rec.add if want else rec.discard)(l)
-            if any(lib.is_fav(l) for l in g):
+            name = grp.chosen_name()
+            if name and name != chosen:                           # the kept title is called by the name you picked
+                lib.meta.set_name(chosen, lib.name(name))
+                self.changed += 1
+            if any(lib.is_fav(l) for l in g if l not in apart):
                 lib.set_fav(chosen, True)
         editions.save_dup_hidden(kind, rec)
         lib.save()

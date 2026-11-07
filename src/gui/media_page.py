@@ -1,14 +1,17 @@
 """Poster wall - one component for a media library (Shows / Movies / Albums) and for a group (mixed kinds)."""
 import math
+from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QAbstractListModel, QTimer, QModelIndex, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView,
                                QMenu, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedLayout, QStyle, QStyledItemDelegate,
                                QVBoxLayout, QWidget)
 
 from ..core import editions
+from ..core.library import title_from_label
+from ..core.names import norm_key, safe_filename
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
 from .widgets import Btn, FlowLayout, SearchBox, Segmented, StatusLabel, button, label
@@ -24,10 +27,7 @@ KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc"}
 
 
 def display_title(lib, label):
-    m = lib.meta.get(label)
-    if lib.kind == "albums":
-        return m.get("title") or label.split(" - ", 1)[-1]
-    return m.get("title") or label
+    return lib.name(label)
 
 
 def display_sub(lib, label):
@@ -40,12 +40,18 @@ def display_sub(lib, label):
 
 def tooltip(lib, label):
     m = lib.meta.get(label)
-    lines = [f"<b>{label}</b>"]
+    lines = [f"<b>{display_title(lib, label)}</b>"]
     for key, name in (("year", "Year"), ("genres", "Genres"), ("countries", "Countries"), ("languages", "Languages"),
                       ("creators", {"albums": "Artist", "movies": "Director"}.get(lib.kind, "Creators")), ("studio", "Studio")):
         v = m.get(key)
         if v:
             lines.append(f"<span style='color:{theme.MUTED}'>{name}:</span> {', '.join(v) if isinstance(v, list) else v}")
+    try:
+        r = float(m.get("rating") or 0)
+    except (TypeError, ValueError):
+        r = 0
+    if r > 0:
+        lines.append(f"<span style='color:{theme.MUTED}'>Rating:</span> {r:.1f}")
     return "<br>".join(lines)
 
 
@@ -141,6 +147,13 @@ class CardDelegate(QStyledItemDelegate):
         super().__init__()
         self.square, self.width, self.base = square, 170, 170     # width = actual card width, base = chosen size
         self.hover_row = -1                                        # the card under the mouse (set by the view)
+        self._title_font = QFont()
+        self._title_font.setPixelSize(13)
+        self._title_font.setWeight(QFont.Weight.DemiBold)
+        self._title_fm = QFontMetrics(self._title_font)
+        self._sub_font = QFont()
+        self._sub_font.setPixelSize(11)
+        self._lines_cache, self._scaled = {}, OrderedDict()        # wrapped captions, poster pixmaps already scaled to the card
 
     def poster_h(self):
         return self.width if self.square else int(self.width * 1.5)
@@ -156,11 +169,29 @@ class CardDelegate(QStyledItemDelegate):
 
     def caption_h(self, index):
         """Height the caption really needs (1-2 title lines, plus the small line when there is one)."""
-        f = QFont()
-        f.setPixelSize(13)
-        f.setWeight(QFont.Weight.DemiBold)
-        n = len(two_lines(QFontMetrics(f), index.data() or "", self.width - 4))
+        n = len(self.lines(index.data() or "", self.width - 4))
         return 17 * max(1, n) + (16 if index.data(ROLE_SUB) else 0)
+
+    def lines(self, text, w):
+        key = (text, w)
+        out = self._lines_cache.get(key)
+        if out is None:
+            if len(self._lines_cache) > 4000:
+                self._lines_cache.clear()
+            out = self._lines_cache[key] = two_lines(self._title_fm, text, w)
+        return out
+
+    def scaled(self, pm, size, mode):
+        key = (pm.cacheKey(), size.width(), size.height(), mode)
+        s = self._scaled.get(key)
+        if s is None:
+            s = pm.scaled(size, mode, Qt.TransformationMode.SmoothTransformation)
+            self._scaled[key] = s
+            while len(self._scaled) > 300:
+                self._scaled.popitem(last=False)
+        else:
+            self._scaled.move_to_end(key)
+        return s
 
     def hit_rect(self, cell, index=None):
         """The visible card (poster + the caption text); the padding and unused caption space belong to the empty space."""
@@ -183,7 +214,7 @@ class CardDelegate(QStyledItemDelegate):
         if pm is not None and not pm.isNull():
             p.setClipPath(shape)
             mode = Qt.AspectRatioMode.KeepAspectRatio if (kind == "albums" and not self.square) else Qt.AspectRatioMode.KeepAspectRatioByExpanding
-            s = pm.scaled(pr.size(), mode, Qt.TransformationMode.SmoothTransformation)
+            s = self.scaled(pm, pr.size(), mode)
             p.drawPixmap(pr.left() + (pr.width() - s.width()) // 2, pr.top() + (pr.height() - s.height()) // 2, s)
             p.setClipping(False)
         else:
@@ -230,26 +261,19 @@ class CardDelegate(QStyledItemDelegate):
             p.drawPath(sp)
         # ---- text
         tx, tw = pr.left() + 2, pr.width() - 4
-        f = QFont(p.font())
-        f.setPixelSize(13)
-        f.setWeight(QFont.Weight.DemiBold)
-        p.setFont(f)
-        fm = QFontMetrics(f)
+        p.setFont(self._title_font)
         y = pr.bottom() + self.GAP
         p.setPen(QColor(theme.TEXT if selected else "#d5d9e6"))
-        for line in two_lines(fm, index.data(), tw):
+        for line in self.lines(index.data() or "", tw):
             p.drawText(QRect(tx, y, tw, 17), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
             y += 17
         y += 1
         sub = index.data(ROLE_SUB)
         if sub:
-            f2 = QFont(p.font())
-            f2.setPixelSize(11)
-            f2.setWeight(QFont.Weight.Normal)
-            p.setFont(f2)
+            p.setFont(self._sub_font)
             p.setPen(QColor(theme.DIM))
             p.drawText(QRect(tx, y, tw, 15), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       QFontMetrics(f2).elidedText(sub, Qt.TextElideMode.ElideRight, tw))
+                       QFontMetrics(self._sub_font).elidedText(sub, Qt.TextElideMode.ElideRight, tw))
         p.restore()
 
     @staticmethod
@@ -361,7 +385,11 @@ class MediaPage(QWidget):
         self.search = SearchBox("Search title, genre, country, creator...")
         self.search.setMinimumWidth(330)
         self.search.setMaximumWidth(460)
-        self.search.textChanged.connect(self.refresh)
+        self._search_timer = QTimer(self)                         # wait for a pause in typing instead of filtering on every key
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(120)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(lambda *_: self._search_timer.start())
         head = QHBoxLayout()
         head.setSpacing(12)
         head.addWidget(self.icon_lbl)
@@ -372,14 +400,14 @@ class MediaPage(QWidget):
         head.addWidget(self.zoom_box)
         head.addWidget(self.search, 1)
         if kind:
-            dup = button("Duplicates", "layers", tip="Find titles that exist more than once (editions, with / without a year) and merge them")
+            dup = button("Duplicates", "layers", tip="Find items that exist more than once (editions, with / without a year) and merge them")
             dup.clicked.connect(self.merge_duplicates)
             head.addWidget(dup)
         if kind:
-            add = button("Add", "plus", tip="Add a title by hand")
+            add = button("Add", "plus", tip="Add an item by hand")
             add.clicked.connect(self.add_item)
             head.addWidget(add)
-            lf = button("", "external", "icon", "Show the list as a txt file (hidden titles left out)")
+            lf = button("", "external", "icon", "Show the list as a txt file (hidden items left out)")
             lf.clicked.connect(self.open_list_file)
             head.addWidget(lf)
         else:
@@ -391,7 +419,7 @@ class MediaPage(QWidget):
                 head.addWidget(b)
 
         # ------------------------------------------------ toolbar (wraps when narrow)
-        self.mode = Segmented([("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden")], "all")
+        self.mode = Segmented([("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden"), ("Duplicates", "dups")], "all")
         self.mode.changed.connect(self.refresh)
         bar = QWidget()
         flow = FlowLayout(bar, 8)
@@ -426,13 +454,16 @@ class MediaPage(QWidget):
         # ------------------------------------------------ action bar: count + clear, then the actions, all on the left
         self.info = label("", "muted")
         self.btn_all = button("Select all", "check", tip="Select / unselect everything currently shown")
-        self.btn_fav = button("Favorite", "star", tip="Toggle favorite for the selected titles")
-        self.btn_group = button("Add to group", "folder", tip="Add the selected titles to a group")
-        self.btn_unlink = button("Remove from group", "minus-circle", tip="Remove the selected titles from this group")
+        self.btn_fav = button("Favorite", "star", tip="Toggle favorite for the selected items")
+        self.btn_group = button("Add to group", "folder", tip="Add the selected items to a group")
+        self.btn_unlink = button("Remove from group", "minus-circle", tip="Remove the selected items from this group")
         self.btn_fav.clicked.connect(self.toggle_fav_selected)
         self.btn_group.clicked.connect(self.group_menu)
         self.btn_unlink.clicked.connect(self.remove_from_group)
         self.btn_all.clicked.connect(self.toggle_select_all)
+        sc = QShortcut(QKeySequence.StandardKey.SelectAll, self)       # Ctrl+A (a text field that has focus keeps its own select-all)
+        sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc.activated.connect(self.select_all)
         self.btn_unlink.setVisible(bool(group))
         actions = QWidget()
         actions.setObjectName("bar")
@@ -454,10 +485,14 @@ class MediaPage(QWidget):
         self.compact = False
 
         body = QVBoxLayout()
-        body.setContentsMargins(24, 20, 24, 0)
+        body.setContentsMargins(24, 20, 6, 0)            # the scrollbar sits close to the window edge
         body.setSpacing(16)
-        body.addLayout(head)
-        body.addWidget(bar)
+        top = QVBoxLayout()                              # header and filter bar keep the full right margin
+        top.setContentsMargins(0, 0, 18, 0)
+        top.setSpacing(16)
+        top.addLayout(head)
+        top.addWidget(bar)
+        body.addLayout(top)
         body.addLayout(self.stack, 1)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -486,11 +521,17 @@ class MediaPage(QWidget):
         return box
 
     # ------------------------------------------------------------ source of items
-    def all_items(self, hidden=False):
-        """The titles of this page; hidden ones only when asked for (the Hidden filter)."""
+    def all_items(self, hidden=False, dups=False):
+        """The items of this page. Normally the shown ones; hidden=True gives the ones you hid yourself; dups=True gives
+        the ones the duplicates dialog hid."""
         have = set(self.lib.items)
         names = self.lib.items if self.kind else [l for l in self.state.groups.members(*self.group) if l in have]
-        return [(self.cat, l) for l in names if self.lib.is_hidden(l) == hidden]
+        auto = {norm_key(l) for l in editions.load_dup_hidden(self.cat)} if self.lib.hidden else set()   # hidden by the duplicates dialog
+        if dups:
+            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) in auto]
+        if hidden:
+            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) not in auto]
+        return [(self.cat, l) for l in names if not self.lib.is_hidden(l)]
 
     def reload(self):
         """Re-read everything (after sync, rename, group changes...)."""
@@ -522,6 +563,15 @@ class MediaPage(QWidget):
             self.group_cb.blockSignals(False)
 
     # ------------------------------------------------------------ filtering
+    def matches(self, label, text):
+        """Search the name you see (a kept / renamed title), not the original label it was merged or renamed from."""
+        t = text.casefold()
+        shown = display_title(self.lib, label)
+        if t in shown.casefold() or (self.cat == "albums" and t in display_sub(self.lib, label).casefold()):
+            return True
+        custom = bool(self.lib.meta.get(label).get("name"))            # a name you chose: the original label is not searched
+        return self.lib.meta.matches(label, text, by_label=not custom)
+
     def visible(self):
         text, mode = self.search.text().strip(), self.mode.value
         want = {f: cb.currentData() for f, cb in self.facets.items() if cb.currentData() not in (None, ALL)}
@@ -529,14 +579,14 @@ class MediaPage(QWidget):
         if self.kind and self.group_cb.currentData() not in (None, ALL):
             members = set(self.state.groups.members(self.cat, self.group_cb.currentData()))
         out = []
-        for kind, l in self.all_items(hidden=mode == "hidden"):
-            if text and not self.lib.meta.matches(l, text):
+        for kind, l in self.all_items(hidden=mode == "hidden", dups=mode == "dups"):
+            if text and not self.matches(l, text):
                 continue
             if mode == "favs" and not self.lib.is_fav(l):
                 continue
             if mode == "sel" and (kind, l) not in self.sel:
                 continue
-            if mode == "nopic" and self.lib.poster(l):
+            if mode == "nopic" and self.lib.has_poster(l):
                 continue
             if members is not None and l not in members:
                 continue
@@ -562,8 +612,10 @@ class MediaPage(QWidget):
             have.sort(key=lambda it: num(it[1], field), reverse=high_first)
             return have + rest
 
+        name = (lambda it: display_title(self.lib, it[1]).casefold()) if self.cat != "albums" else (lambda it: it[1].casefold())   # the name you see
+
         if key == "za":
-            return sorted(items, key=lambda it: it[1].casefold(), reverse=True)
+            return sorted(items, key=name, reverse=True)
         if key == "favs":
             return sorted(items, key=lambda it: not self.lib.is_fav(it[1]))
         if key == "artist":
@@ -574,16 +626,18 @@ class MediaPage(QWidget):
             return by("rating", True)
         if key in ("plays_most", "plays_least"):
             return by("playcount", key == "plays_most")
-        return sorted(items, key=lambda it: it[1].casefold())
+        return sorted(items, key=name)
 
     def refresh(self, *_):
         items = self.visible()
         self.model.set_items(items)
-        total = len(self.all_items(hidden=self.mode.value == "hidden"))
+        total = len(self.all_items(hidden=self.mode.value == "hidden", dups=self.mode.value == "dups"))
         self.count.setText(f"{len(items)} of {total}" if len(items) != total else f"{total}")
         if not items:
             if self.mode.value == "hidden" and total == 0:
-                self.empty.setText("No hidden titles.\nRight-click a title and choose Hide to tuck it away.")
+                self.empty.setText("No hidden items.\nRight-click an item and choose Hide to tuck it away.")
+            elif self.mode.value == "dups" and total == 0:
+                self.empty.setText("No hidden duplicates.")
             elif total == 0:
                 self.empty.setText("No items yet." + ("\nPress Sync to import from your sources, or use Add." if self.kind else
                                                        f"\nSelect titles in {self.lib.title} and choose Add to group."))
@@ -655,6 +709,11 @@ class MediaPage(QWidget):
         self.model.touch_all()
         self.update_bar()
 
+    def select_all(self):
+        self.sel |= set(self.model.items)
+        self.model.touch_all()
+        self.update_bar()
+
     def toggle_select_all(self):
         shown = set(self.model.items)
         if shown and shown <= self.sel:
@@ -679,18 +738,19 @@ class MediaPage(QWidget):
         self.lib.save()
         self.model.touch(idx.row())
         self.update_bar()
+        self._self_updated = self.mode.value != "favs" and (self.sort_cb.currentData() != "favs")   # current already, unless the filter / sort depends on favorites
         self.data_changed.emit()
 
     def toggle_fav_selected(self):
         sel = self.selected()
         value = not self._fav_state
         if len(sel) > 1:                                # changing many at once is easy to do by accident: confirm
-            if not confirm(self, "Favorites", f"{'Add' if value else 'Remove'} {len(sel)} titles {'to' if value else 'from'} your favorites?", "Yes"):
+            if not confirm(self, "Favorites", f"{'Add' if value else 'Remove'} {len(sel)} items {'to' if value else 'from'} your favorites?", "Yes"):
                 return
         for _, l in sel:
             self.lib.set_fav(l, value)
         self.lib.save()
-        self.log.emit(f"{len(sel)} title(s) {'added to' if value else 'removed from'} favorites")
+        self.log.emit(f"{len(sel)} item(s) {'added to' if value else 'removed from'} favorites")
         self.refresh()
         self.data_changed.emit()
 
@@ -713,7 +773,7 @@ class MediaPage(QWidget):
         name = name or self._ask_group()
         if name and items:
             n = self.state.groups.add(self.cat, name, [l for _, l in items])
-            self.log.emit(f"Group '{name}': +{n} title(s)")
+            self.log.emit(f"Group '{name}': +{n} item(s)")
             self.groups_changed.emit()
 
     def remove_from_group(self):
@@ -725,7 +785,7 @@ class MediaPage(QWidget):
             self.reload()
 
     def rename_group(self):
-        new = ask_text(self, "Rename group", f"New name for the group ‘{self.group[1]}’ (the titles in it are not changed):", self.group[1], "Rename")
+        new = ask_text(self, "Rename group", f"New name for the group ‘{self.group[1]}’ (the items in it are not changed):", self.group[1], "Rename")
         if new and new != self.group[1]:
             if self.state.groups.rename(self.cat, self.group[1], new):
                 self.group_renamed.emit(self.cat, self.group[1], new)
@@ -733,20 +793,24 @@ class MediaPage(QWidget):
                 notify(self, "Rename group", "A group with that name already exists.")
 
     def delete_group(self):
-        if confirm(self, "Delete group", f"Delete the group '{self.group[1]}'?\nThe titles themselves are not touched.", "Delete", danger=True):
+        if confirm(self, "Delete group", f"Delete the group '{self.group[1]}'?\nThe items themselves are not touched.", "Delete", danger=True):
             self.state.groups.delete(self.cat, self.group[1])
             self.group_deleted.emit(self.cat, self.group[1])
 
     def open_list_file(self):
-        """A txt with the titles you see (hidden ones left out), written next to the library's data."""
+        """A txt with the items you see (hidden ones left out), written next to the library's data."""
         import os
-        path = self.lib.list_path.with_name("shown.txt")
-        path.write_text("\n".join(self.lib.shown_items()) + "\n", encoding="utf-8")
+        path = self.lib.json_path.with_name("shown.txt")
+        lines = [f"{display_sub(self.lib, l)} - {display_title(self.lib, l)}" if self.cat == "albums" and display_sub(self.lib, l)
+                 else display_title(self.lib, l) for l in self.lib.shown_items()]            # the names you see, renames included
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         os.startfile(path)
 
     def open_group_file(self):
         import os
-        os.startfile(self.state.groups.path(self.cat, self.group[1]))
+        path = self.lib.json_path.with_name(f"group_{safe_filename(self.group[1])}.txt")       # a readable copy of the group
+        path.write_text("\n".join(self.state.groups.members(self.cat, self.group[1])) + "\n", encoding="utf-8")
+        os.startfile(path)
 
     # ------------------------------------------------------------ hand-off to the collage page
     def current_picks(self):
@@ -781,6 +845,8 @@ class MediaPage(QWidget):
         menu.addAction(icons.icon("eye" if hid else "eye-off", theme.MUTED, 16),
                        ("Unhide" if hid else "Hide") + (f" ({len(items)})" if many else ""),
                        lambda: self.set_hidden(labels, not hid))
+        if many:
+            menu.addAction(icons.icon("layers", theme.MUTED, 16), f"Mark {len(items)} as duplicates", lambda: self.mark_duplicates(labels))
         sub = menu.addMenu(icons.icon("folder", theme.MUTED, 16), "Add to group")
         for name in self.state.groups.names(self.cat):
             sub.addAction(name, lambda n=name: self.add_to_group(items, n))
@@ -797,7 +863,7 @@ class MediaPage(QWidget):
         menu.exec(self.view.viewport().mapToGlobal(pos))
 
     def set_favs(self, labels, value):
-        if len(labels) > 1 and not confirm(self, "Favorites", f"{'Add' if value else 'Remove'} {len(labels)} titles {'to' if value else 'from'} your favorites?", "Yes"):
+        if len(labels) > 1 and not confirm(self, "Favorites", f"{'Add' if value else 'Remove'} {len(labels)} items {'to' if value else 'from'} your favorites?", "Yes"):
             return
         for l in labels:
             self.lib.set_fav(l, value)
@@ -805,13 +871,21 @@ class MediaPage(QWidget):
         self.refresh()
         self.data_changed.emit()
 
+    def mark_duplicates(self, labels):
+        """The selected items are the same one: add them as a set and open the duplicates dialog to pick which to keep."""
+        editions.mark_duplicates(self.cat, labels)
+        self.sel.clear()
+        self.model.touch_all()
+        self.update_bar()
+        self.merge_duplicates()
+
     def set_hidden(self, labels, value):
-        """Hidden titles disappear from every list (except the Hidden filter) and are left out of collages."""
+        """Hidden items disappear from every list (except the Hidden filter) and are left out of collages."""
         for l in labels:
             self.lib.set_hidden(l, value)
             self.sel.discard((self.cat, l))
         self.lib.save()
-        self.log.emit(f"{len(labels)} title(s) {'hidden' if value else 'shown again'}")
+        self.log.emit(f"{len(labels)} item(s) {'hidden' if value else 'shown again'}")
         self.reload_facets()
         self.refresh()
         self.data_changed.emit()
@@ -819,7 +893,7 @@ class MediaPage(QWidget):
     def remove_many(self, labels):
         if len(labels) == 1:
             return self.remove(labels[0])
-        if not confirm(self, "Remove titles", f"Remove {len(labels)} titles from the list?\nSyncs will not add them back. The poster files are kept.", "Remove", danger=True):
+        if not confirm(self, "Remove items", f"Remove {len(labels)} items?\nThis deletes them and their posters. Hide them instead to keep them out of sight.", "Remove", danger=True):
             return
         for l in labels:
             self.lib.forget(l)
@@ -847,25 +921,18 @@ class MediaPage(QWidget):
             self.refresh()
 
     def rename(self, label_):
-        new = ask_text(self, "Rename", "New title (the poster stays linked, and syncs will keep using this name):", label_, "Rename")
-        if new and new != label_:
-            if not self.lib.rename(label_, new, alias=True):
-                notify(self, "Rename", "An item with that title already exists.")
-                return
-            rec = editions.load_dup_hidden(self.cat)
-            if label_ in rec:                                    # a hidden duplicate keeps its mark under the new name
-                editions.save_dup_hidden(self.cat, (rec - {label_}) | {new})
+        """Give an item the name you want it to have. Only the shown name changes: the item keeps its label, poster,
+        groups and hidden / duplicate state, and syncs keep matching it by its source name."""
+        shown = display_title(self.lib, label_)
+        new = ask_text(self, "Rename", "New name:", shown, "Rename")
+        if new and new.strip() and new.strip() != shown:
+            self.lib.meta.set_name(label_, new.strip())
             self.lib.save()
-            in_groups = bool(self.state.groups.groups_of(self.cat, label_))
-            self.state.groups.replace_member(self.cat, label_, new)
-            self.sel.discard((self.cat, label_))
             self.state.changed.emit()
             self.data_changed.emit()
-            if in_groups:
-                self.groups_changed.emit()
 
     def remove(self, label_):
-        if confirm(self, "Remove", f"Remove '{label_}' from the list?\nSyncs will not add it back. (The poster file is kept.)", "Remove", danger=True):
+        if confirm(self, "Remove", f"Remove '{display_title(self.lib, label_)}'?\nThis deletes it and its poster. Hide it instead to keep it out of sight.", "Remove", danger=True):
             self.lib.forget(label_)
             self.lib.save()
             in_groups = bool(self.state.groups.groups_of(self.cat, label_))
@@ -881,7 +948,7 @@ class MediaPage(QWidget):
             return
         self.lib.unforget(title)                     # adding by hand overrides an earlier removal
         if not self.lib.add(title):
-            notify(self, "Add", "That title is already in the list.")
+            notify(self, "Add", "That item is already in the list.")
             return
         path, _ = QFileDialog.getOpenFileName(self, "Choose a poster (optional)", "", "Images (*.jpg *.jpeg *.png *.webp)")
         if path:

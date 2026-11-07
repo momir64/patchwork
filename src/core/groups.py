@@ -1,70 +1,71 @@
 """Custom groups ("Sci-fi", "Metal", "Horror night").
 
-A group belongs to exactly one category (shows, movies or albums) and is stored as a plain txt file in that
-category's folder:  data/<kind>/groups/<name>.txt  - one title per line, sorted.
+A group belongs to exactly one category (shows, movies or albums). All groups of a category live in
+data/<kind>/groups.json as {name: [titles]}.
 """
 from .config import kind_dir
-from .library import read_lines, write_sorted
-from .names import safe_filename
+from .jsonstore import read_json, write_json
+from .names import sort_key
 
 
 class Groups:
-    """Group files are read once and cached (the pages ask for names / members many times per change);
+    """The group files are read once and cached (the pages ask for names / members many times per change);
     every change made here refreshes the cache, refresh() re-reads after outside changes."""
 
     def __init__(self):
-        self._names, self._members, self._made = {}, {}, set()
+        self._data = {}
 
     def refresh(self):
-        self._names.clear()
-        self._members.clear()
+        self._data.clear()
 
-    def folder(self, kind):
-        d = kind_dir(kind) / "groups"
-        if kind not in self._made:
-            d.mkdir(parents=True, exist_ok=True)
-            self._made.add(kind)
-        return d
+    def _file(self, kind):
+        return kind_dir(kind) / "groups.json"
 
-    def path(self, kind, name):
-        return self.folder(kind) / f"{safe_filename(name)}.txt"
+    def _load(self, kind) -> dict:
+        if kind not in self._data:
+            self._data[kind] = read_json(self._file(kind), {})
+        return self._data[kind]
+
+    def _save(self, kind):
+        write_json(self._file(kind), dict(sorted(self._load(kind).items(), key=lambda kv: kv[0].casefold())))
 
     def names(self, kind):
-        if kind not in self._names:
-            self._names[kind] = sorted((p.stem for p in self.folder(kind).glob("*.txt")), key=str.casefold)
-        return list(self._names[kind])
+        return sorted(self._load(kind), key=str.casefold)
+
+    def exists(self, kind, name):
+        return name in self._load(kind)
 
     def members(self, kind, name):
-        key = (kind, name)
-        if key not in self._members:
-            self._members[key] = read_lines(self.path(kind, name))
-        return list(self._members[key])
+        return list(self._load(kind).get(name, []))
 
     def add(self, kind, name, labels):
         """Creates the group if needed. Returns how many titles were actually added."""
-        cur = set(self.members(kind, name))
+        d = self._load(kind)
+        cur = set(d.get(name, []))
         new = cur | set(labels)
-        write_sorted(self.path(kind, name), new)
-        self.refresh()
+        d[name] = sorted(new, key=sort_key)
+        self._save(kind)
         return len(new) - len(cur)
 
     def remove_items(self, kind, name, labels):
-        write_sorted(self.path(kind, name), set(self.members(kind, name)) - set(labels))
-        self.refresh()
+        d = self._load(kind)
+        d[name] = sorted(set(d.get(name, [])) - set(labels), key=sort_key)
+        self._save(kind)
 
     def delete(self, kind, name):
-        self.path(kind, name).unlink(missing_ok=True)
-        self.refresh()
+        self._load(kind).pop(name, None)
+        self._save(kind)
 
     def rename(self, kind, old, new):
-        if self.path(kind, new).exists():
+        d = self._load(kind)
+        if new in d or old not in d:
             return False
-        self.path(kind, old).rename(self.path(kind, new))
-        self.refresh()
+        d[new] = d.pop(old)
+        self._save(kind)
         return True
 
     def groups_of(self, kind, label):
-        return [n for n in self.names(kind) if label in set(self.members(kind, n))]
+        return [n for n, members in self._load(kind).items() if label in set(members)]
 
     def replace_member(self, kind, old, new):
         """An item was renamed: keep it in all its groups."""

@@ -5,13 +5,13 @@ All data is plain files under ./data so it can be browsed/edited by hand:
 
     data/
       shows|movies|albums/
-        list.txt          every title, sorted
-        favorites.txt    favorite titles, sorted
+        library.json      titles, favorites, hidden and removed titles
         meta.json         genres, countries, languages, creators, ids ... (keyed by title)
-        groups/<name>.txt hand-made groups of this category, one title per line
+        groups.json       hand-made groups of this category: {name: [titles]}
+        duplicates.json   duplicate sets marked "not duplicates" and titles hidden as duplicates
         posters/          <title>.jpg
       output/             finished collages
-      aliases.txt         different spellings of one title
+      aliases.json        different spellings of one title (older txt files are kept in data/_txt_backup)
 """
 import os
 from pathlib import Path
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = ROOT / ".env"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "output"
-ALIASES_PATH = DATA_DIR / "aliases.txt"
+ALIASES_PATH = DATA_DIR / "aliases.json"
 KIND_NAMES = ("shows", "movies", "albums")
 
 
@@ -36,6 +36,7 @@ KEYS = {
     "RADARR_API_KEY": ("", "Radarr -> Settings -> General -> API Key"),
     "SONARR_ONLY_DOWNLOADED": ("false", "true = only shows that actually have files in Sonarr"),
     "RADARR_ONLY_DOWNLOADED": ("false", "true = only movies that actually have files in Radarr"),
+    "RADARR_ONLY_UNMONITORED": ("true", "true = only movies Radarr no longer monitors (the ones that are done / watched)"),
     "TRAKT_CLIENT_ID": ("", "https://trakt.tv/oauth/applications -> your app's Client ID"),
     "TRAKT_USER": ("", "Trakt username (profile must be public)"),
     "TRAKT_SYNC_FAVORITES": ("false", "true = titles you rated highly on Trakt become favorites"),
@@ -110,5 +111,7 @@ class Config:
 
 
 def ensure_dirs():
-    for d in (OUTPUT_DIR, *(kind_dir(k) / sub for k in KIND_NAMES for sub in ("posters", "groups"))):
+    for d in (OUTPUT_DIR, *(kind_dir(k) / "posters" for k in KIND_NAMES)):
         d.mkdir(parents=True, exist_ok=True)
+    from .jsonstore import migrate_txt
+    migrate_txt(DATA_DIR, KIND_NAMES)                 # old txt data files become JSON (once)

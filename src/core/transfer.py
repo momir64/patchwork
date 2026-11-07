@@ -11,9 +11,11 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .config import ALIASES_PATH, KIND_NAMES
+from .config import KIND_NAMES
 from .groups import Groups
-from .library import Library, add_alias, load_aliases, read_lines
+from .jsonstore import read_json
+from .config import ALIASES_PATH
+from .library import Library, add_alias, load_aliases
 from .names import norm_key
 
 FORMAT, VERSION, DATA_NAME = "patchwork-export", 1, "patchwork.json"
@@ -32,7 +34,7 @@ def collect(log=print):
             "metadata": lib.meta.by_label,
             "posters": {l: lib.poster(l).name for l in lib.items if lib.poster(l)},
         }
-    aliases = [l for l in read_lines(ALIASES_PATH) if "=>" in l and not l.startswith("#")]
+    aliases = [f"{a} => {b}" for a, b in read_json(ALIASES_PATH, {}).items()]       # exported as "a => b" lines, like before
     return {"format": FORMAT, "version": VERSION, "exported": datetime.now().isoformat(timespec="seconds"),
             "kinds": kinds, "aliases": aliases}
 
