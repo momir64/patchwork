@@ -438,7 +438,7 @@ class MediaPage(QWidget):
         flow.addWidget(self.mode)
         self.sort_cb = QComboBox()
         self.sort_cb.setMinimumWidth(150)
-        self.sort_names = tuple(sorted(SORTS["albums" if self.cat == "albums" else "video"], key=lambda t: t[0].casefold()))   # alphabetical
+        self.sort_names = tuple(sorted(SORTS["albums" if self.cat == "albums" else "video"], key=self._sort_rank))   # alphabetical
         for text, _, key in self.sort_names:
             self.sort_cb.addItem(text, key)
         self.sort_cb.setCurrentIndex(self.sort_cb.findData("az"))                   # Title is the default
@@ -686,6 +686,12 @@ class MediaPage(QWidget):
             return by("playcount")
         return items[::-1] if rev else items
 
+    def _sort_rank(self, sort):
+        """Menu order: alphabetical, except that albums list Title first and Artist second."""
+        text, _, key = sort
+        first = ("az", "artist").index(key) if self.cat == "albums" and key in ("az", "artist") else 2
+        return first, text.casefold()
+
     def _label_sorts(self, on):
         names = {key: (text, reversed_text) for text, reversed_text, key in self.sort_names + (HIDDEN_SORT,)}
         for i in range(self.sort_cb.count()):                                # the titles describe the direction now in use
@@ -704,8 +710,9 @@ class MediaPage(QWidget):
         want = self.mode.value in ("hidden", "dups")
         at = self.sort_cb.findData("hidden")
         if want and at < 0:
-            names = {key: text for text, _, key in self.sort_names}                  # natural labels give the alphabetical place
-            pos = sum(names[self.sort_cb.itemData(i)].casefold() < HIDDEN_SORT[0].casefold() for i in range(self.sort_cb.count()))
+            ranks = {key: self._sort_rank((text, None, key)) for text, _, key in self.sort_names}   # natural labels give the place
+            at_rank = self._sort_rank(HIDDEN_SORT)
+            pos = sum(ranks[self.sort_cb.itemData(i)] < at_rank for i in range(self.sort_cb.count()))
             self.sort_cb.blockSignals(True)
             self.sort_cb.insertItem(pos, HIDDEN_SORT[0], "hidden")
             self.sort_cb.blockSignals(False)
