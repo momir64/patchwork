@@ -481,7 +481,7 @@ class SettingsDialog(Modal):
         return f
 
     def export_data(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export data", "patchwork-export.zip", "With posters (*.zip);;Data only (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export data", "patchwork-data.zip", "With posters (*.zip);;Data only (*.json)")
         if path:
             try:
                 transfer.export_data(path, lambda m: None)
