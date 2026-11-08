@@ -333,7 +333,7 @@ class Sidebar(QWidget):
         v.addSpacing(2)
 
         self.settings_btn = Btn("Settings", "settings", "ghost")
-        self.log_btn = Btn("Log", "list", "ghost", "Show the activity log")
+        self.log_btn = Btn("Logs", "list", "ghost", "Show the activity logs")
         for b in (self.settings_btn, self.log_btn):
             b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)      # share the width whatever it is: never widen the panel
         self.settings_btn.clicked.connect(self.settings_clicked)
@@ -448,7 +448,7 @@ class Sidebar(QWidget):
         self.sync_btn.setText("" if compact else (getattr(self, "busy_text", "Syncing...") if self.syncing else "Sync"))
         self.collage_btn.set_compact(compact)
         self.settings_btn.setText("" if compact else "Settings")
-        self.log_btn.setText("" if compact else "Log")
+        self.log_btn.setText("" if compact else "Logs")
         self._foot_direction()
         for it in (*(i for k, i in self.items.items() if k != "collage"), *self.group_items.values()):
             it.set_compact(compact)

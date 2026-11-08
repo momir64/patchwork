@@ -40,6 +40,7 @@ class Sync:
         self.seen = {k: [] for k in libs}   # entries found this run, per kind (carry poster urls / tmdb ids)
         self.kinds = KINDS
         self.force_meta = False
+        spotify_api.should_stop = self.cancel.is_set     # Spotify waits (rate limits) end as soon as the sync is cancelled
 
     def check(self):
         if self.cancel.is_set():
@@ -154,8 +155,11 @@ class Sync:
             self.progress(done[0], len(jobs))
             return job, result
 
-        with ThreadPoolExecutor(workers) as ex:
+        ex = ThreadPoolExecutor(workers)
+        try:
             yield from ex.map(wrapped, jobs)
+        finally:                                        # cancelled / failed: do not wait for the queued jobs or the ones mid-request
+            ex.shutdown(wait=False, cancel_futures=True)
 
     def _fill_posters(self):
         known = {kind: {} for kind in self.libs}

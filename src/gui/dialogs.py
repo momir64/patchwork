@@ -664,10 +664,10 @@ class EditionTile(QWidget):
 
 
 class EditionSet(QWidget):
-    """The copies of one title side by side (max 3 per row). Click a cover to keep that one (the others get hidden); the chip on
+    """The copies of one title side by side (max 2 per row). Click a cover to keep that one (the others get hidden); the chip on
     a cover says it is a different title, not a duplicate. When fewer than two copies are left as duplicates, the set is
     "not duplicates" altogether. When the names differ a lot, a Name box picks what the kept title is called."""
-    GAP, VGAP, PAD, COLS, NAME = 12, 8, 10, 3, 32
+    GAP, VGAP, PAD, COLS, NAME = 12, 8, 10, 2, 32
 
     def __init__(self, labels, plays, lib, thumbs, keep, cover_h, poster=None, name_choice=False, noun="title", default_name=None):
         super().__init__()
@@ -790,10 +790,17 @@ class AdaptiveGrid(QWidget):
         need = max(c.min_w for c in self.cards)
         cols = max(1, (w + self.gap) // (need + self.gap))
         cw = (w - (cols - 1) * self.gap) // cols
+        height = lambda c: getattr(c, "natural_h", c.height())
+        rows, row = [], []
+        for c in self.cards:                              # every row is full (the cards are sorted by size, so rows mostly match)
+            if row and len(row) == cols:
+                rows.append(row)
+                row = []
+            row.append(c)
+        rows.append(row)
         y = 0
-        for i in range(0, len(self.cards), cols):
-            row = self.cards[i:i + cols]
-            rh = max(getattr(c, "natural_h", c.height()) for c in row)
+        for row in rows:
+            rh = max(height(c) for c in row)
             for j, c in enumerate(row):
                 c.setFixedHeight(rh)                      # one height per row, so the covers line up across cards
                 c.setGeometry(j * (cw + self.gap), y, cw, rh)
@@ -820,6 +827,7 @@ class DuplicatesDialog(Modal):
                 if edit or sum(not lib.is_hidden(l) for l in g) > 1]     # at most one shown = already resolved (also when you hid the last one yourself)
         if only is not None:
             sets = [g for g in sets if any(l in only for l in g)]
+        sets.sort(key=lambda g: (len(g), min(g, key=str.casefold).casefold()))     # fewest copies first, so same-sized cards share rows
         head = "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s"
         super().__init__(parent, ("Edit " + head.lower()) if edit else head, 820 if sets else 340)
         self.state, self.kind, self.lib, self.sets = state, kind, lib, sets
