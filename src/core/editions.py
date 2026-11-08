@@ -5,19 +5,45 @@ from collections import defaultdict
 
 from .config import kind_dir
 from .jsonstore import read_json, write_json
-from .names import norm_key
+from .names import fold, norm_key
 
 WORDS = (r"deluxe|remaster(?:ed)?|edition|expanded|anniversary|version|bonus|special|explicit|clean|reissue|re-issue|"
-         r"collector'?s?|super|legacy|mono|stereo|original|digital|extended|platinum|limited|tour")
+         r"collector'?s?|super|legacy|mono|stereo|original|digital|extended|platinum|limited|tour|ultimate|complete")
+_ORD = r"(?:\d{4}|\d+(?:st|nd|rd|th))"                           # '2015' / '20th'
 _PAREN = re.compile(rf"\s*[\(\[][^)\]]*\b(?:{WORDS})\b[^)\]]*[\)\]]", re.I)
-_SUFFIX = re.compile(rf"\s*[-–:]\s*(?:\d{{4}}\s+)?(?:{WORDS})\b.*$", re.I)
+_SUFFIX = re.compile(rf"\s*[-–:]\s*(?:{_ORD}\s+)?(?:{WORDS})\b.*$", re.I)
+# edition words with no bracket or dash in front: 'Warrior Deluxe', 'Meteora 20th Anniversary Edition', 'X Limited Tour Edition'
+_BARE = re.compile(rf"(?:\s+(?:{WORDS}|{_ORD}|the|and|box|set|track|tracks|international))*\s+(?:edition|version|remaster(?:ed)?|re-?issue|deluxe)\s*$", re.I)
+_RELEASE = re.compile(r"(?:\s*[-–]\s*|\s+)(?:ep|single)\s*$|\s*[\(\[](?:ep|single)[\)\]]", re.I)     # 'Zombie EP', 'Woodland - EP', 'X - Single'
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10}
+_NUMBER_WORDS = dict(zip("one two three four five six seven eight nine ten".split(), range(1, 11)))
+_PART = re.compile(r"\b(?:volume|vol|part|pt|step)\b\.?\s*", re.I)            # 'Vol. I', 'Part 1', 'Pt. One', 'Step II' -> just the number
+
+
+def strip_tags(label: str) -> str:
+    """The title without edition words, lower case: 'Ghost - Meliora (Deluxe Edition)' -> 'ghost - meliora'."""
+    t = _SUFFIX.sub("", _PAREN.sub("", label))
+    for rx in (_BARE, _RELEASE):
+        cut = rx.sub("", t)
+        if cut.strip():
+            t = cut
+    return re.sub(r"\s+", " ", t).strip().casefold()
+
+
+def is_plain(label: str) -> bool:
+    return strip_tags(label) == re.sub(r"\s+", " ", label).strip().casefold()
 
 
 def base_key(label: str) -> str:
-    """'Ghost - Meliora (Deluxe Edition)' and 'Ghost - Meliora' share one key."""
-    t = _PAREN.sub("", label)
-    t = _SUFFIX.sub("", t)
-    return re.sub(r"\s+", " ", t).strip().casefold()
+    """One key for every spelling of an album: edition words, EP / Single tags, '&' / 'and', a leading 'The', accents, curly
+    quotes, dots and 'Vol. I' / 'Part 1' / 'Pt. One' wording are all ignored."""
+    t = fold(strip_tags(label).replace("&", " and ").replace("’", "'").replace("`", "'"))
+    t = re.sub(r"(^|\s-\s)the\s+", r"\1", t)
+    t = re.sub(r"[^\w]+", " ", _PART.sub(" ", t)).strip()
+    words = t.split()
+    if len(words) > 1:                                  # 'one' / 'ii' as the last word of the title: a plain number
+        words[-1] = str(_ROMAN.get(words[-1]) or _NUMBER_WORDS.get(words[-1]) or words[-1])
+    return " ".join(words)
 
 
 _TAG = re.compile(r"\s*\((\d{4}|[A-Z]{2,3})\)\s*$")
@@ -159,12 +185,12 @@ def groups(labels, kind="albums", lib=None) -> list:
 
 def keeper(group, is_fav=lambda l: False, plays=lambda l: 0, poster=lambda l: None) -> str:
     """The one to keep: a favorite, then the most played, then one that has a poster, then the plain title, then the shortest."""
-    return min(group, key=lambda l: (not is_fav(l), -plays(l), not poster(l), base_key(l) != l.casefold(), len(l), l.casefold()))
+    return min(group, key=lambda l: (not is_fav(l), -plays(l), not poster(l), not is_plain(l), len(l), l.casefold()))
 
 
 def simplest(group, kind="albums") -> str:
     """The simplest name of a set: no edition words / year / country tag, then the shortest."""
-    plain = (lambda l: base_key(l) == l.casefold()) if kind == "albums" else (lambda l: not split_tag(l)[1])
+    plain = is_plain if kind == "albums" else (lambda l: not split_tag(l)[1])
     return min(group, key=lambda l: (not plain(l), len(l), l.casefold()))
 
 
