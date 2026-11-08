@@ -14,9 +14,12 @@ All data is plain files under ./data so it can be browsed/edited by hand:
       aliases.json        different spellings of one title (older txt files are kept in data/_txt_backup)
 """
 import os
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+FROZEN = getattr(sys, "frozen", False)                            # running as the packaged .exe
+RES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))     # bundled read-only files (assets)
+ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parents[2]   # .env and data/ live next to the exe
 ENV_PATH = ROOT / ".env"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "output"
@@ -47,6 +50,8 @@ KEYS = {
     "LASTFM_PERIOD": ("overall", "overall | 7day | 1month | 3month | 6month | 12month"),
     "LASTFM_LIMIT": ("1024", "How many of your most played albums to import (0 = all of them)"),
     "TMDB_API_KEY": ("", "Fallback posters + genres/countries/creators for shows & movies"),
+    "SPOTIFY_CLIENT_ID": ("", "https://developer.spotify.com/dashboard -> your app's Client ID"),
+    "SPOTIFY_CLIENT_SECRET": ("", "https://developer.spotify.com/dashboard -> your app's Client secret"),
 }
 
 
@@ -108,6 +113,7 @@ class Config:
     trakt_ready = property(lambda self: bool(self.get("TRAKT_CLIENT_ID") and self.get("TRAKT_USER")))
     lastfm_ready = property(lambda self: bool(self.get("LASTFM_API_KEY") and self.get("LASTFM_USER")))
     tmdb_ready = property(lambda self: bool(self.get("TMDB_API_KEY")))
+    spotify_ready = property(lambda self: bool(self.get("SPOTIFY_CLIENT_ID") and self.get("SPOTIFY_CLIENT_SECRET")))
 
 
 def ensure_dirs():

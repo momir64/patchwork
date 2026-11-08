@@ -1,5 +1,6 @@
 """A Library = one media kind (shows / movies / albums): titles, favorites, hidden / removed titles (library.json), posters."""
 import re
+import time
 import shutil
 from pathlib import Path
 
@@ -164,7 +165,12 @@ class Library:
         return norm_key(label) in self.removed
 
     def set_hidden(self, label: str, value: bool):
+        newly = value and norm_key(label) not in self.hidden
         (self.hidden.add if value else self.hidden.discard)(norm_key(label))
+        if newly and not self.meta.get(label).get("hidden_at"):      # when it was hidden (for the Hidden tab's sort)
+            self.meta.update(label, {"hidden_at": time.time()})
+        elif not value:
+            self.meta.drop(label, "hidden_at")
 
     def name(self, label: str) -> str:
         """What the app shows for an item: the name you chose, else what the source calls it, else the plain label.

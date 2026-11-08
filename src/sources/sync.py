@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..core.library import Library, load_aliases
 from ..core.names import norm_key
-from . import arr, covers, lastfm, musicbrainz, spotify, tmdb
+from . import arr, covers, lastfm, musicbrainz, spotify, spotify_api, tmdb
 from .http import download_image
 from .trakt import Trakt
 
@@ -105,6 +105,7 @@ class Sync:
             self._fill_posters()
         if metadata:
             self._album_metadata()
+            self._album_years()
             self.libs["albums"].meta.save()
         return self.summary
 
@@ -180,7 +181,7 @@ class Sync:
             if not got and kind == "albums":                     # e.g. Spotify imports carry no picture
                 m = lib.meta.get(label)
                 if m.get("creators"):
-                    for url in covers.album_cover_urls(self.cfg, m["creators"][0], m.get("title") or ""):
+                    for url in covers.album_cover_urls(self.cfg, m["creators"][0], m.get("title") or "", m.get("ids", {}).get("artist_mbid")):
                         got = download_image(url)               # a source can know the album and still hand out a dead link
                         if got:
                             break
@@ -224,8 +225,94 @@ class Sync:
                     lib.meta.update(label, meta)
         if "albums" in self.kinds:
             self._album_metadata()
+            self._album_years()
         for lib in self.libs.values():
             lib.meta.save()
+
+    def _album_years(self):
+        """Release year per album: Spotify first (when its credentials are set), then MusicBrainz (one request per artist),
+        then iTunes. An album no source knows is flagged so it is not asked again; network trouble is not flagged."""
+        lib = self.libs["albums"]
+        left = [l for l in lib.items if lib.meta.get(l).get("creators") and not lib.meta.get(l).get("year") and not lib.meta.get(l).get("year_tried")]
+        if not left:
+            return
+        total, self._year_trouble, found = len(left), set(), {}
+        self.stage("Looking up release years")
+        if self.cfg.spotify_ready:
+            left = self._years_by_album(left, "Spotify", lambda m, t: spotify_api.album_year(self.cfg, m["creators"][0], t), 4, found)
+        if left:
+            left = self._years_musicbrainz(left, found)
+        if left:
+            left = self._years_by_album(left, "iTunes", lambda m, t: covers.album_year(m["creators"][0], t), 4, found)
+        for l in left:
+            if l not in self._year_trouble:
+                lib.meta.update(l, {"year_tried": True})
+        lib.meta.save()
+        got = sum(found.values())
+        self.summary.append(f"release years: {got}/{total}")
+        self.log("Release years found: " + (", ".join(f"{n} from {src}" for src, n in found.items()) or "none"))
+
+    def _years_by_album(self, labels, source, lookup, workers, found):
+        """One search per album. Returns the labels this source could not date."""
+        lib = self.libs["albums"]
+        self.log(f"Looking up the release year of {len(labels)} albums ({source})...")
+
+        def work(l):
+            m = lib.meta.get(l)
+            try:
+                return lookup(m, m.get("title") or l.split(" - ", 1)[-1])
+            except Exception as e:
+                if not self._year_trouble:
+                    self.log(f"  [{source}] {e}")
+                return -1                                    # network trouble: try again next sync
+
+        missed = []
+        for n, (l, year) in enumerate(self._pool(labels, work, workers), 1):
+            if year == -1:
+                self._year_trouble.add(l)
+                missed.append(l)
+            elif year:
+                lib.meta.update(l, {"year": year})
+                found[source] = found.get(source, 0) + 1
+            else:
+                missed.append(l)
+            if n % 50 == 0:
+                lib.meta.save()
+                self.log(f"Release years ({source}): {n}/{len(labels)} albums done")
+        return missed
+
+    def _years_musicbrainz(self, labels, found):
+        """MusicBrainz lists every release of an artist in one go, so this is one request per artist, not per album."""
+        lib, by_artist = self.libs["albums"], {}
+        for l in labels:
+            by_artist.setdefault(norm_key(lib.meta.get(l)["creators"][0]), []).append(l)
+        self.log(f"Looking up release years of {len(by_artist)} artists (MusicBrainz, about 1 per second)...")
+
+        def work(group):
+            first = lib.meta.get(group[0])
+            try:
+                mbid = next((lib.meta.get(l).get("ids", {}).get("artist_mbid") for l in group if lib.meta.get(l).get("ids", {}).get("artist_mbid")), None)
+                mbid = mbid or musicbrainz.find_artist_id(first["creators"][0])
+                return musicbrainz.artist_years(mbid) if mbid else {}
+            except Exception:
+                return None                                  # network trouble
+
+        missed = []
+        for n, (group, years) in enumerate(self._pool(list(by_artist.values()), work, 1), 1):
+            for l in group:
+                m = lib.meta.get(l)
+                year = musicbrainz.year_of(years, m.get("title") or l.split(" - ", 1)[-1]) if years else None
+                if year:
+                    lib.meta.update(l, {"year": year})
+                    found["MusicBrainz"] = found.get("MusicBrainz", 0) + 1
+                else:
+                    missed.append(l)
+                    if years is None:
+                        self._year_trouble.add(l)
+            if n % 20 == 0:
+                lib.meta.save()
+                self.log(f"Release years (MusicBrainz): {n}/{len(by_artist)} artists done")
+        return missed
 
     def _album_metadata(self):
         """Genres + country from MusicBrainz per artist (about one request per second), Last.fm tags as fallback."""
@@ -279,6 +366,9 @@ def test_connection(which, cfg) -> str:
         if which == "lastfm":
             lastfm.check(cfg)
             return "OK - Last.fm user found"
+        if which == "spotify":
+            spotify_api.check(cfg)
+            return "OK - Spotify credentials accepted"
     except Exception as e:
         return f"Failed - {e}"
     return "Unknown source"

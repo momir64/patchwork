@@ -1,5 +1,6 @@
 """Application state shared by all pages (libraries, groups, collage picks, thumbnails, UI preferences)."""
 import json
+from collections import Counter
 
 from PySide6.QtCore import QObject, Signal
 
@@ -16,6 +17,8 @@ class AppState(QObject):
     changed = Signal()              # lists / favorites / posters changed
     groups_changed = Signal()
     zoom_changed = Signal(int)      # the poster size slider is shared by every page
+    reverse_changed = Signal(bool)  # so is the reverse sort button
+    reverse_sort = False
 
     def __init__(self):
         super().__init__()
@@ -46,6 +49,18 @@ class AppState(QObject):
     def group_color(self, kind, name):
         from .sidebar import folder_color
         return self.pref("group_colors", {}).get(f"{kind}|{name}") or folder_color(name)
+
+    def add_group(self, kind, name, labels):
+        """Add titles to a group (creating it when needed). A new group gets the palette color used by the fewest groups of
+        its own media type, picked at random among the equally rare ones. Returns how many titles were added."""
+        new = not self.groups.exists(kind, name)
+        if new:
+            import random
+            from .sidebar import FOLDER_COLORS
+            used = Counter(self.group_color(kind, n) for n in self.groups.names(kind))
+            least = min(used.get(c, 0) for c in FOLDER_COLORS)
+            self.set_group_color(kind, name, random.choice([c for c in FOLDER_COLORS if used.get(c, 0) == least]))
+        return self.groups.add(kind, name, labels)
 
     def set_group_color(self, kind, name, color):
         colors = dict(self.pref("group_colors", {}))

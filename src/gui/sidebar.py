@@ -7,12 +7,11 @@ from PySide6.QtGui import QColor, QDrag, QPainter, QPixmap
 from PySide6.QtWidgets import (QBoxLayout, QButtonGroup, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from ..core.config import ROOT
 from . import icons, theme
 from .widgets import Btn, ProgressLine, section_header
 
-FOLDER_COLORS = ["#8b6cff", "#ff6b9d", "#40c9c6", "#ffc933", "#ff8c42", "#5aa9ff", "#7bd88f", "#c77dff"]
-COLOR_NAMES = ["Violet", "Pink", "Teal", "Amber", "Orange", "Blue", "Green", "Orchid"]
+FOLDER_COLORS = ["#ff5252", "#ff8c42", "#ffc933", "#7bd88f", "#40c9c6", "#5aa9ff", "#8b6cff", "#c77dff", "#ff6b9d"]     # rainbow order
+COLOR_NAMES = ["Red", "Orange", "Amber", "Green", "Teal", "Blue", "Violet", "Orchid", "Pink"]
 KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc"}
 
 
@@ -31,6 +30,34 @@ class BigNav(Btn):
 
     def set_compact(self, compact):
         self.setText("" if compact else self.name)
+
+
+class ElidedLabel(QLabel):
+    """A label that can be squeezed to any width: the text is cut with an ellipsis instead of widening the panel."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        self.full = text
+        self._elide()
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self.full) + 2, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self):
+        shown = self.fontMetrics().elidedText(self.full, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        if shown != super().text():
+            super().setText(shown)
 
 
 class NavItem(QPushButton):
@@ -53,7 +80,7 @@ class NavItem(QPushButton):
         h = QHBoxLayout(self)
         h.setContentsMargins(indent, 0, 8, 0)
         h.setSpacing(10)
-        self.ic, self.txt, self.cnt = QLabel(), QLabel(text), QLabel("")
+        self.ic, self.txt, self.cnt = QLabel(), ElidedLabel(text), QLabel("")
         self.cnt.setObjectName("count")
         self.ic.setFixedSize(20, 20)
         self.ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -186,6 +213,31 @@ class NavItem(QPushButton):
             h.setAlignment(self.ic, Qt.AlignmentFlag.AlignCenter)
 
 
+class Grip(QWidget):
+    """Invisible strip on the right edge of the panel: drag it to change the panel's width."""
+    W = 6
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.bar, self.start = bar, None
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setToolTip("Drag to resize")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.start = (e.globalPosition().x(), self.bar.width())
+
+    def mouseMoveEvent(self, e):
+        if self.start:
+            x0, w0 = self.start
+            self.bar.set_wide(w0 + e.globalPosition().x() - x0)
+
+    def mouseReleaseEvent(self, e):
+        if self.start:
+            self.start = None
+            self.bar.width_changed.emit(self.bar.wide)
+
+
 class Sidebar(QWidget):
     navigate = Signal(str)
     new_group = Signal(str)                # kind
@@ -197,12 +249,16 @@ class Sidebar(QWidget):
     settings_clicked = Signal()
     log_clicked = Signal()
     WIDE, NARROW = 256, 68
+    MIN_WIDE, MAX_WIDE, STACK_BELOW = 200, 420, 232
+    width_changed = Signal(int)             # the panel was dragged to a new width (saved by the app)
 
     def __init__(self, titles):
         super().__init__()
         self.setObjectName("sidebar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)     # custom QWidget subclasses ignore QSS backgrounds without this
         self.compact = False
+        self.wide = self.WIDE
+        self.grip = Grip(self)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.items, self.group_items, self.group_boxes = {}, {}, {}
@@ -279,7 +335,7 @@ class Sidebar(QWidget):
         self.settings_btn = Btn("Settings", "settings", "ghost")
         self.log_btn = Btn("Log", "list", "ghost", "Show the activity log")
         for b in (self.settings_btn, self.log_btn):
-            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)      # share the width whatever it is: never widen the panel
         self.settings_btn.clicked.connect(self.settings_clicked)
         self.log_btn.clicked.connect(self.log_clicked)
         self.foot = QBoxLayout(QBoxLayout.Direction.LeftToRight)
@@ -366,16 +422,34 @@ class Sidebar(QWidget):
         self.progress.setRange(0, b)
         self.progress.setValue(a)
 
+    def set_wide(self, w):
+        """Width of the full (not compact) panel."""
+        self.wide = max(self.MIN_WIDE, min(self.MAX_WIDE, int(w)))
+        if not self.compact:
+            self.setFixedWidth(self.wide)
+            self._foot_direction()
+
+    def _foot_direction(self):
+        """Settings and Log sit side by side while there is room for both labels, else one above the other."""
+        side = not self.compact and self.wide >= self.STACK_BELOW
+        self.foot.setDirection(QBoxLayout.Direction.LeftToRight if side else QBoxLayout.Direction.TopToBottom)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.grip.setGeometry(self.width() - Grip.W, 0, Grip.W, self.height())
+        self.grip.raise_()
+
     def set_compact(self, compact):
         self.compact = compact
-        self.setFixedWidth(self.NARROW if compact else self.WIDE)
+        self.grip.setVisible(not compact)
+        self.setFixedWidth(self.NARROW if compact else self.wide)
         for w in (self.sec_lib, self.opts_btn):
             w.setVisible(not compact)
         self.sync_btn.setText("" if compact else (getattr(self, "busy_text", "Syncing...") if self.syncing else "Sync"))
         self.collage_btn.set_compact(compact)
         self.settings_btn.setText("" if compact else "Settings")
         self.log_btn.setText("" if compact else "Log")
-        self.foot.setDirection(QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight)
+        self._foot_direction()
         for it in (*(i for k, i in self.items.items() if k != "collage"), *self.group_items.values()):
             it.set_compact(compact)
         self.layout().setContentsMargins(*((10, 14, 10, 12) if compact else (12, 14, 12, 12)))

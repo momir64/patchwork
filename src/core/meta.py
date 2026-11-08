@@ -8,7 +8,7 @@ from collections import Counter
 
 from . import genres
 from .config import kind_dir
-from .names import norm_key
+from .names import fold, norm_key
 
 LIST_FIELDS = ("genres", "countries", "languages", "creators")
 FACETS = {"genre": "genres", "country": "countries", "language": "languages", "creator": "creators",
@@ -91,6 +91,8 @@ class Meta:
                 continue
             if k == "name" and cur.get("name"):
                 continue                         # the name you chose is never replaced by an import
+            if k in cur.get("edited", ()):
+                continue                         # a field you edited by hand is never changed by a sync
             if k == "title" and cur.get("title_locked"):
                 continue                         # (older data) a locked title
             if k == "languages":
@@ -140,6 +142,47 @@ class Meta:
             self.by_label[key].pop("name", None)
         self.dirty = True
 
+    def drop(self, label, key):
+        cur = self.by_label.get(self._index.get(norm_key(label), ""))
+        if cur is not None and key in cur:
+            del cur[key]
+            self.dirty = True
+
+    def set_fields(self, label, fields: dict) -> bool:
+        """Values you typed in the metadata editor. A field that differs from what is stored is replaced (empty removes it)
+        and remembered in `edited`, so later syncs leave it alone. Returns True when anything changed."""
+        key = self._index.get(norm_key(label))
+        if key is None:
+            key = label
+            self._index[norm_key(label)] = label
+            self.by_label[label] = {}
+        cur = self.by_label[key]
+        before = json.dumps(cur, sort_keys=True)
+        edited = set(cur.get("edited", []))
+        for k, v in fields.items():
+            if k == "languages":
+                v = [norm_language(x) for x in as_list(v)]
+            elif k == "countries":
+                v = [norm_country(x) for x in as_list(v)]
+            elif k in LIST_FIELDS:
+                v = as_list(v)
+            v = list(dict.fromkeys(v)) if isinstance(v, list) else v
+            old = cur.get(k)
+            if v in (None, "", []):
+                if old in (None, "", []):
+                    continue
+                cur.pop(k, None)
+            elif old == v:
+                continue
+            else:
+                cur[k] = v
+            edited.add(k)
+        if edited:
+            cur["edited"] = sorted(edited)
+        changed = json.dumps(cur, sort_keys=True) != before
+        self.dirty = self.dirty or changed
+        return changed
+
     def remove(self, label):
         key = self._index.pop(norm_key(label), None)
         if key is not None:
@@ -165,9 +208,9 @@ class Meta:
 
     def matches(self, label, text, by_label=True) -> bool:
         """Text in the title (when by_label), or in year / studio / genres / countries / languages / creators."""
-        text = text.casefold()
-        if by_label and text in label.casefold():
+        text = fold(text)
+        if by_label and text in fold(label):
             return True
         m = self.get(label)
         hay = [str(m.get("year", "")), str(m.get("studio", ""))] + [x for f in LIST_FIELDS for x in as_list(m.get(f))]
-        return any(text in h.casefold() for h in hay)
+        return any(text in fold(h) for h in hay)

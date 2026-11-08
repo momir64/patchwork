@@ -2,7 +2,7 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
                                QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
@@ -117,16 +117,30 @@ class SyncDialog(Modal):
         row.addStretch()
         v.addLayout(row)
         self.body.addWidget(f)
-        self.footer("Start sync", "sync", self.accept_choice)
+        self.start, self._cancelled = False, False
+        self.footer("Start sync", "sync", self.accept_choice, on_cancel=self.cancel)
+
+    def cancel(self):
+        self._cancelled = True                    # the Cancel button throws the changes away
+        self.reject()
+
+    def reject(self):
+        if not self._cancelled:                   # closing with X (or Esc) keeps the options, without syncing
+            self._collect()
+        super().reject()
 
     def accept_choice(self):
+        self.start = True
+        self._collect()
+        self.accept()
+
+    def _collect(self):
         self.choice = {
             "sources": [k for k, b in self.boxes["sources"].items() if b.isChecked()],
             "steps": [k for k, b in self.boxes["steps"].items() if b.isChecked()],
             "kinds": [k for k, b in self.boxes["kinds"].items() if b.isChecked()],
             "force_meta": self.force.isChecked(),
         }
-        self.accept()
 
 
 # ====================================================================== settings
@@ -136,6 +150,8 @@ SECTIONS = (
     ("Trakt", "Watch history of a public profile", "trakt", ("TRAKT_CLIENT_ID", "TRAKT_USER", "TRAKT_FAV_MIN_RATING", "TRAKT_SYNC_FAVORITES")),
     ("Last.fm", "Your played albums", "lastfm", ("LASTFM_API_KEY", "LASTFM_USER", "LASTFM_SOURCE", "LASTFM_PERIOD", "LASTFM_LIMIT")),
     ("TMDB", "Posters and details for shows and movies", None, ("TMDB_API_KEY",)),
+    ("Spotify API", "Your own free Spotify app (developer.spotify.com/dashboard): create an app and paste its Client ID and Client secret",
+     "spotify", ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET")),
 )
 CHECKS = {"SONARR_ONLY_DOWNLOADED": "Skip shows without files", "RADARR_ONLY_DOWNLOADED": "Skip movies without files",
           "RADARR_ONLY_UNMONITORED": "Add movies only after they are unmonitored",
@@ -150,7 +166,8 @@ LIMIT_HINTS = {"top": "The most played of your top albums for the period. 0 impo
 NICE = {"SONARR_URL": "Address", "SONARR_API_KEY": "API key", "SONARR_ONLY_DOWNLOADED": "Only downloaded", "RADARR_ONLY_DOWNLOADED": "Only downloaded", "RADARR_ONLY_UNMONITORED": "Only unmonitored", "LASTFM_SOURCE": "Albums from",
         "RADARR_URL": "Address", "RADARR_API_KEY": "API key", "TRAKT_CLIENT_ID": "Client ID", "TRAKT_USER": "Username",
         "TRAKT_SYNC_FAVORITES": "Trakt sync", "TRAKT_FAV_MIN_RATING": "Favorite if rated ≥", "LASTFM_API_KEY": "API key",
-        "LASTFM_USER": "Username", "LASTFM_PERIOD": "Period", "LASTFM_LIMIT": "Albums to import", "TMDB_API_KEY": "API key"}
+        "LASTFM_USER": "Username", "LASTFM_PERIOD": "Period", "LASTFM_LIMIT": "Albums to import", "TMDB_API_KEY": "API key",
+        "SPOTIFY_CLIENT_ID": "Client ID", "SPOTIFY_CLIENT_SECRET": "Client secret"}
 
 
 class SettingsDialog(Modal):
@@ -418,7 +435,7 @@ class SettingsDialog(Modal):
             else:
                 w = QLineEdit(cfg.get(k))
                 w.setToolTip(KEYS[k][1])
-                if k.endswith(("API_KEY", "CLIENT_ID")):
+                if k.endswith(("API_KEY", "CLIENT_ID", "CLIENT_SECRET")):
                     w.setEchoMode(QLineEdit.EchoMode.Password)
             self.fields[k] = w
             lab = QLabel(NICE[k])
@@ -788,7 +805,9 @@ class DuplicatesDialog(Modal):
     """Titles that exist more than once. Pick the one to show; the others are moved to Hidden (not deleted), so you can
     open this again and pick a different one at any time."""
 
-    def __init__(self, state, kind="albums", parent=None):
+    def __init__(self, state, kind="albums", parent=None, edit=False, only=None):
+        """edit=True also lists the sets that are already resolved, so an earlier choice can be changed.
+        only: when given, just the sets that contain one of these titles."""
         noun = NOUNS[kind]
         lib = state.libs[kind]
         if kind == "albums":                              # hash the covers first (parallel; only new / changed ones are read)
@@ -798,8 +817,11 @@ class DuplicatesDialog(Modal):
             finally:
                 QApplication.restoreOverrideCursor()
         sets = [g for g in editions.groups(lib.items, kind, lib)
-                if sum(not lib.is_hidden(l) for l in g) != 1]            # one shown, rest hidden = already resolved
-        super().__init__(parent, "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s", 820 if sets else 340)
+                if edit or sum(not lib.is_hidden(l) for l in g) > 1]     # at most one shown = already resolved (also when you hid the last one yourself)
+        if only is not None:
+            sets = [g for g in sets if any(l in only for l in g)]
+        head = "Duplicate editions" if kind == "albums" else f"Duplicate {noun}s"
+        super().__init__(parent, ("Edit " + head.lower()) if edit else head, 820 if sets else 340)
         self.state, self.kind, self.lib, self.sets = state, kind, lib, sets
         plays = lambda l: self.lib.meta.get(l).get("playcount", 0) or 0
         self.choices, self.changed = [], 0
@@ -815,6 +837,7 @@ class DuplicatesDialog(Modal):
             keep = shown[0] if len(shown) == 1 else editions.keeper(g, self.lib.is_fav, plays, self.lib.poster)
             es = EditionSet(g, plays, self.lib, state.thumbs, keep, cover_h, name_choice=self._names_differ(g), noun=noun,
                             default_name=editions.simplest(g, kind))
+            es.all_hidden_default = keep if not shown else None   # nothing shown (you hid them yourself): leave it unless you pick
             self.choices.append(es)
             grid.add(es)
         inner = QWidget()
@@ -842,6 +865,8 @@ class DuplicatesDialog(Modal):
         rec = editions.load_dup_hidden(kind)
         for grp, g in zip(self.choices, self.sets):
             chosen = grp.keep()
+            if chosen is not None and chosen == grp.all_hidden_default and not grp.apart_labels():
+                continue                                          # still the untouched default of a set you had hidden entirely
             if chosen is None:                                    # really different titles: show all, do not offer again
                 for l in g:
                     lib.set_hidden(l, False)
@@ -866,4 +891,78 @@ class DuplicatesDialog(Modal):
                 lib.set_fav(chosen, True)
         editions.save_dup_hidden(kind, rec)
         lib.save()
+        self.accept()
+
+
+class MetadataDialog(Modal):
+    """Edit what is stored about one item: name, creator, year, genres, countries, languages (and studio / overview for
+    shows and movies). Lists are typed separated by commas. Fields changed here are kept when you sync."""
+
+    def __init__(self, state, kind, lbl, parent=None):
+        super().__init__(parent, "Edit metadata", 560)
+        self.lib, self.lbl, self.kind, self.changed = state.libs[kind], lbl, kind, False
+        m = self.lib.meta.get(lbl)
+        self.body.addWidget(label("Separate several values with commas. Changed fields are kept when you sync.", "muted", wrap=True))
+        form = QGridLayout()                              # fixed row spacing; only the overview grows when the dialog is resized
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setColumnStretch(1, 1)
+        add_row = lambda text, w, top=False: (form.addWidget(label(text, "muted"), form.rowCount(), 0,
+                                                             Qt.AlignmentFlag.AlignTop if top else Qt.AlignmentFlag.AlignVCenter),
+                                              form.addWidget(w, form.rowCount() - 1, 1))
+        joined = lambda key: ", ".join(str(x) for x in (m.get(key) or []))
+        creator = {"albums": "Artist", "movies": "Director"}.get(kind, "Creators")
+        self.name = QLineEdit(self.lib.name(lbl))
+        self.creators = QLineEdit(joined("creators"))
+        self.year = QLineEdit(str(m.get("year") or ""))
+        self.genres = QLineEdit(joined("genres"))
+        self.countries = QLineEdit(joined("countries"))
+        self.languages = QLineEdit(joined("languages"))
+        for text, w in (("Name", self.name), (creator, self.creators), ("Year", self.year), ("Genres", self.genres),
+                        ("Countries", self.countries), ("Languages", self.languages)):
+            add_row(text, w)
+        self.studio = self.overview = None
+        if kind != "albums":
+            self.studio = QLineEdit(str(m.get("studio") or ""))
+            add_row("Studio", self.studio)
+            self.overview = QPlainTextEdit(str(m.get("overview") or ""))
+            self.overview.setMinimumHeight(110)
+            add_row("Overview", self.overview, top=True)
+            form.setRowStretch(form.rowCount() - 1, 1)
+        self.body.addLayout(form, 1 if self.overview else 0)
+        if not self.overview:
+            self.body.addStretch(1)
+        self.error = label("", "muted")
+        self.error.hide()                                 # only takes room when there is something to say
+        self.body.addWidget(self.error)
+        self.footer("Save", "check", self.save)
+
+    def event(self, e):
+        r = super().event(e)
+        if e.type() == QEvent.Type.WindowActivate and not getattr(self, "_unfocused", False):
+            self._unfocused = True                        # no field starts out focused / selected
+            QTimer.singleShot(0, lambda: (w := self.focusWidget()) and w.clearFocus())
+        return r
+
+    def save(self):
+        split = lambda w: [x.strip() for x in w.text().split(",") if x.strip()]
+        year = self.year.text().strip()
+        if year and not year.isdigit():
+            self.error.setText("Year must be a number.")
+            self.error.show()
+            return
+        fields = {"creators": split(self.creators), "year": int(year) if year else None, "genres": split(self.genres),
+                  "countries": split(self.countries), "languages": split(self.languages)}
+        if self.studio is not None:
+            fields["studio"] = self.studio.text().strip()
+            fields["overview"] = self.overview.toPlainText().strip()
+        meta = self.lib.meta
+        changed = meta.set_fields(self.lbl, fields)
+        name = self.name.text().strip()
+        if name and name != self.lib.name(self.lbl):
+            meta.set_name(self.lbl, name)
+            changed = True
+        if changed:
+            self.lib.save()
+        self.changed = changed
         self.accept()

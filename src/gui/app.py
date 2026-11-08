@@ -8,7 +8,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QInputDialog, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
-from ..core.config import DATA_DIR, ROOT, Config
+from ..core.config import DATA_DIR, RES, Config
 from ..core import editions
 from ..core.library import KINDS, Library
 from ..sources import Sync
@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Patchwork")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)      # the app draws its own title bar
-        self.setWindowIcon(QIcon(str(ROOT / "assets" / "icon.png")))
+        self.setWindowIcon(QIcon(str(RES / "assets" / "icon.png")))
         self.setMinimumSize(720, 480)
         self.state = AppState()
         self.log_lines, self.sync_job, self.current_key, self.last_status, self._pct = [], None, None, "", -1
@@ -83,6 +83,8 @@ class MainWindow(QMainWindow):
         self.sidebar.sync_clicked.connect(lambda: self.start_sync(self.state.pref("sync", DEFAULT_SYNC)))
         self.sidebar.sync_options.connect(self.sync_options)
         self.sidebar.settings_clicked.connect(self.open_settings)
+        self.sidebar.set_wide(self.state.pref("sidebar_width", self.sidebar.WIDE))
+        self.sidebar.width_changed.connect(lambda w: self.state.set_pref("sidebar_width", w))
         self.sidebar.set_expanded(self.state.pref("groups_open", {}))
         self.sidebar.expanded_changed.connect(lambda k, on: self.state.set_pref("groups_open", {**self.state.pref("groups_open", {}), k: on}))
         self.sidebar.log_clicked.connect(self.show_log)
@@ -166,11 +168,20 @@ class MainWindow(QMainWindow):
 
     def update_counts(self):
         self.sidebar.set_counts({k: len(self.state.libs[k].shown_items()) for k in KINDS})
+        for k in KINDS:
+            self.sidebar.set_groups(k, self._group_rows(k))
+        self.sidebar.set_current(self.current_key)
 
     # ------------------------------------------------------------ groups
+    def _group_rows(self, kind):
+        """(name, number of visible members, color) per group; hidden titles are not counted."""
+        lib = self.state.libs[kind]
+        return [(n, sum(not lib.is_hidden(l) for l in self.state.groups.members(kind, n)), self.state.group_color(kind, n))
+                for n in self.state.groups.names(kind)]
+
     def move_group(self, kind, name, target, after):
         self.state.groups.move(kind, name, target, after)
-        self.sidebar.set_groups(kind, [(n, len(self.state.groups.members(kind, n)), self.state.group_color(kind, n)) for n in self.state.groups.names(kind)])
+        self.sidebar.set_groups(kind, self._group_rows(kind))
         self.sidebar.set_current(self.current_key)
         self.collage.reload_groups()
 
@@ -195,7 +206,7 @@ class MainWindow(QMainWindow):
             self._add_media_page(f"group:{key[0]}:{key[1]}", page)
             self.group_pages[key] = page
         for k in KINDS:
-            self.sidebar.set_groups(k, [(n, len(self.state.groups.members(k, n)), self.state.group_color(k, n)) for n in self.state.groups.names(k)])
+            self.sidebar.set_groups(k, self._group_rows(k))
         for p in self.all_media_pages():
             if p.kind:
                 p.reload_facets()
@@ -207,7 +218,7 @@ class MainWindow(QMainWindow):
         title = self.state.libs[kind].title
         name = ask_text(self, "New group", f"Name of the new group in {title} (e.g. Sci-fi, Horror night):", "", "Create")
         if name:
-            self.state.groups.add(kind, name, [])
+            self.state.add_group(kind, name, [])
             self.rebuild_groups()
             self.go(f"group:{kind}:{name}")
 
@@ -277,9 +288,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ sync
     def sync_options(self):
         dlg = SyncDialog(self.state.cfg, self.state.pref("sync", DEFAULT_SYNC), self)
-        if dlg.exec() and dlg.choice:
+        dlg.exec()
+        if dlg.choice:                                      # Start sync, or closed with X: the options are kept
             self.state.set_pref("sync", dlg.choice)
-            self.start_sync(dlg.choice)
+            if dlg.start:
+                self.start_sync(dlg.choice)
 
     def start_sync(self, choice):
         if self.sync_job:
@@ -470,7 +483,7 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName("Patchwork")
-    app.setWindowIcon(QIcon(str(ROOT / "assets" / "icon.png")))
+    app.setWindowIcon(QIcon(str(RES / "assets" / "icon.png")))
     apply_theme(app)
     win = MainWindow()
     if not win.restore_geometry():

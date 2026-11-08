@@ -24,5 +24,11 @@ def norm_key(label: str) -> str:
     return "".join(c for c in s if c.isalnum())
 
 
+def fold(text: str) -> str:
+    """For searching: lower case, without accents (š c ć č ž = s c c c z) and with đ written as dj."""
+    s = unicodedata.normalize("NFKD", str(text).casefold().replace("đ", "dj"))
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
 def sort_key(label: str):
     return (label.casefold(), label)

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout
 
 from ..core import covers, editions
 from ..core.library import title_from_label
-from ..core.names import norm_key, safe_filename, sort_key
+from ..core.names import fold, norm_key, safe_filename, sort_key
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
 from .widgets import Btn, FlowLayout, SearchCombo, SearchBox, Segmented, StatusLabel, button, label
@@ -133,12 +133,20 @@ def two_lines(fm, text, w):
 
 
 SORTS = {
-    "video": (("Title A–Z", "az"), ("Title Z–A", "za"), ("Released: newest", "year_new"), ("Released: oldest", "year_old"),
-              ("Highest rated", "rating"), ("Added: newest", "added_new"), ("Added: oldest", "added_old"), ("Favorites first", "favs")),
-    "albums": (("Title A–Z", "az"), ("Title Z–A", "za"), ("Artist A–Z", "artist"), ("Most played", "plays_most"),
-               ("Least played", "plays_least"), ("Added: newest", "added_new"), ("Added: oldest", "added_old"), ("Color: rainbow", "hue"), ("Color: dark to light", "bright"),
-               ("Favorites first", "favs")),
+    # (title, title when the reverse button is on, key): each option has one natural direction that the button flips
+    "video": (("Title (A–Z)", "Title (Z–A)", "az"), ("Released (newest first)", "Released (oldest first)", "year"),
+              ("Rating (highest first)", "Rating (lowest first)", "rating"),
+              ("Added (newest first)", "Added (oldest first)", "added"), ("Favorites first", "Favorites last", "favs")),
+    "albums": (("Title (A–Z)", "Title (Z–A)", "az"), ("Artist (A–Z)", "Artist (Z–A)", "artist"),
+               ("Released (newest first)", "Released (oldest first)", "year"),
+               ("Plays (most first)", "Plays (least first)", "plays"),
+               ("Added (newest first)", "Added (oldest first)", "added"),
+               ("Color (rainbow)", "Color (wobniar)", "hue"),
+               ("Color (dark to light)", "Color (light to dark)", "bright"), ("Favorites first", "Favorites last", "favs")),
 }
+
+
+HIDDEN_SORT = ("Hidden (latest first)", "Hidden (earliest first)", "hidden")      # offered on the Hidden / Duplicates tabs only
 
 
 class CardDelegate(QStyledItemDelegate):
@@ -402,9 +410,9 @@ class MediaPage(QWidget):
         head.addWidget(self.zoom_box)
         head.addWidget(self.search, 1)
         if kind:
-            dup = button("Duplicates", "layers", tip="Find items that exist more than once (editions, with / without a year) and merge them")
-            dup.clicked.connect(self.merge_duplicates)
-            head.addWidget(dup)
+            self.dup_btn = button("Resolve duplicates", "layers", tip="Find items that exist more than once (editions, with / without a year) and merge them")
+            self.dup_btn.clicked.connect(self.merge_duplicates)
+            head.addWidget(self.dup_btn)
         if kind:
             add = button("Add", "plus", tip="Add an item by hand")
             add.clicked.connect(self.add_item)
@@ -430,11 +438,24 @@ class MediaPage(QWidget):
         flow.addWidget(self.mode)
         self.sort_cb = QComboBox()
         self.sort_cb.setMinimumWidth(150)
-        for text, key in SORTS["albums" if self.cat == "albums" else "video"]:
+        self.sort_names = tuple(sorted(SORTS["albums" if self.cat == "albums" else "video"], key=lambda t: t[0].casefold()))   # alphabetical
+        for text, _, key in self.sort_names:
             self.sort_cb.addItem(text, key)
+        self.sort_cb.setCurrentIndex(self.sort_cb.findData("az"))                   # Title is the default
         self.sort_cb.setToolTip("Sort order")
         self.sort_cb.currentIndexChanged.connect(self.refresh)
+        self._sort_picked = self.sort_cb.currentData()
+        self.sort_cb.activated.connect(self._sort_activated)
         flow.addWidget(self.sort_cb)
+        self.reverse_btn = Btn("", "sort", "toggle", "Reverse the sort order", size=16, pad=0, color=theme.TEXT)    # the icon keeps its color when on
+        self.reverse_btn.setCheckable(True)
+        self.reverse_btn.setFixedWidth(theme.HEIGHT + 2)
+        self.reverse_btn.setChecked(state.reverse_sort)
+        self.reverse_btn.toggled.connect(self._reverse_toggled)
+        state.reverse_changed.connect(self._reverse_from_other)
+        self._resort = False
+        self._label_sorts(state.reverse_sort)
+        flow.addWidget(self.reverse_btn)
         self.facets = {}
         for facet in ("genre", "country", "language"):
             cb = SearchCombo()
@@ -452,6 +473,8 @@ class MediaPage(QWidget):
         self.empty = label("", "muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stack = QStackedLayout()
+        self.view.setParent(self)                         # parentless widgets that get shown flash up as tiny windows at start
+        self.empty.setParent(self)
         self.stack.addWidget(self.view)
         self.stack.addWidget(self.empty)
 
@@ -474,6 +497,7 @@ class MediaPage(QWidget):
         redo = QShortcut(QKeySequence.StandardKey.Redo, self)          # Ctrl+Y / Ctrl+Shift+Z
         redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         redo.activated.connect(lambda: self.undo_selection(redo=True))
+        self.btn_unlink.setParent(self)
         self.btn_unlink.setVisible(bool(group))
         actions = QWidget()
         actions.setObjectName("bar")
@@ -580,9 +604,9 @@ class MediaPage(QWidget):
     # ------------------------------------------------------------ filtering
     def matches(self, label, text):
         """Search the name you see (a kept / renamed title), not the original label it was merged or renamed from."""
-        t = text.casefold()
+        t = fold(text)
         shown = display_title(self.lib, label)
-        if t in shown.casefold() or (self.cat == "albums" and t in display_sub(self.lib, label).casefold()):
+        if t in fold(shown) or (self.cat == "albums" and t in fold(display_sub(self.lib, label))):
             return True
         custom = bool(self.lib.meta.get(label).get("name"))            # a name you chose: the original label is not searched
         return self.lib.meta.matches(label, text, by_label=not custom)
@@ -612,7 +636,10 @@ class MediaPage(QWidget):
 
     def sorted_items(self, items):
         key = self.sort_cb.currentData() or "az"
+        rev = self.reverse_btn.isChecked()                  # flips the natural direction of the chosen sort
         meta = self.lib.meta
+        name = lambda it: (display_title(self.lib, it[1]).casefold(), display_sub(self.lib, it[1]).casefold())   # the title you see, then artist
+        items = sorted(items, key=name)                     # ties keep A-Z order (every sort below is stable)
 
         def num(l, field):
             try:
@@ -620,31 +647,29 @@ class MediaPage(QWidget):
             except (TypeError, ValueError):
                 return None
 
-        def by(field, high_first):
-            # missing values always go last; ties keep A-Z order (the sort is stable)
+        def by(field):
+            # highest first (lowest first when reversed); missing values always go last
             have = [it for it in items if num(it[1], field) is not None]
             rest = [it for it in items if num(it[1], field) is None]
-            have.sort(key=lambda it: num(it[1], field), reverse=high_first)
+            have.sort(key=lambda it: num(it[1], field), reverse=not rev)
             return have + rest
 
-        name = (lambda it: display_title(self.lib, it[1]).casefold()) if self.cat != "albums" else (lambda it: it[1].casefold())   # the name you see
-
-        if key == "za":
-            return sorted(items, key=name, reverse=True)
         if key == "favs":
-            return sorted(items, key=lambda it: not self.lib.is_fav(it[1]))
+            return sorted(items, key=lambda it: not self.lib.is_fav(it[1]), reverse=rev)
         if key == "artist":
-            return sorted(items, key=lambda it: ((meta.get(it[1]).get("creators") or ["~"])[0].casefold(), it[1].casefold()))
-        if key in ("year_new", "year_old"):
-            return by("year", key == "year_new")
+            return sorted(items, key=lambda it: ((meta.get(it[1]).get("creators") or ["~"])[0].casefold(), it[1].casefold()), reverse=rev)
+        if key == "year":
+            return by("year")
+        if key == "hidden":                                 # items hidden before this was recorded have no time and go last
+            return by("hidden_at")
         if key in ("hue", "bright"):                        # by cover color; the colors are worked out in parallel once, then cached
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 covers.warm_colors(self.lib)
             finally:
                 QApplication.restoreOverrideCursor()
-            return sorted(items, key=lambda it: covers.color_key(self.lib, it[1], key))
-        if key in ("added_new", "added_old"):
+            return sorted(items, key=lambda it: covers.color_key(self.lib, it[1], key), reverse=rev)
+        if key == "added":
             def added(it):                                  # when it joined the library; older items fall back to their poster's date
                 t = meta.get(it[1]).get("added")
                 if not t:
@@ -654,14 +679,78 @@ class MediaPage(QWidget):
                     except OSError:
                         t = 0
                 return t
-            return sorted(items, key=added, reverse=key == "added_new")
+            return sorted(items, key=added, reverse=not rev)
         if key == "rating":
-            return by("rating", True)
-        if key in ("plays_most", "plays_least"):
-            return by("playcount", key == "plays_most")
-        return sorted(items, key=name)
+            return by("rating")
+        if key == "plays":
+            return by("playcount")
+        return items[::-1] if rev else items
+
+    def _label_sorts(self, on):
+        names = {key: (text, reversed_text) for text, reversed_text, key in self.sort_names + (HIDDEN_SORT,)}
+        for i in range(self.sort_cb.count()):                                # the titles describe the direction now in use
+            text, reversed_text = names[self.sort_cb.itemData(i)]
+            self.sort_cb.setItemText(i, reversed_text if on else text)
+
+    def _sort_activated(self, index):
+        """Picking the sort that is already active flips its direction (same as the reverse button)."""
+        key = self.sort_cb.itemData(index)
+        if key == self._sort_picked:
+            self.reverse_btn.toggle()
+        self._sort_picked = key
+
+    def _sync_hidden_sort(self):
+        """'Hidden (latest first)' only exists on the tabs that list hidden items."""
+        want = self.mode.value in ("hidden", "dups")
+        at = self.sort_cb.findData("hidden")
+        if want and at < 0:
+            names = {key: text for text, _, key in self.sort_names}                  # natural labels give the alphabetical place
+            pos = sum(names[self.sort_cb.itemData(i)].casefold() < HIDDEN_SORT[0].casefold() for i in range(self.sort_cb.count()))
+            self.sort_cb.blockSignals(True)
+            self.sort_cb.insertItem(pos, HIDDEN_SORT[0], "hidden")
+            self.sort_cb.blockSignals(False)
+            self._label_sorts(self.reverse_btn.isChecked())
+        elif not want and at >= 0:
+            self.sort_cb.blockSignals(True)
+            if self.sort_cb.currentIndex() == at:
+                self.sort_cb.setCurrentIndex(self.sort_cb.findData("az"))
+                self._sort_picked = "az"
+            self.sort_cb.removeItem(at)
+            self.sort_cb.blockSignals(False)
+
+    def _reverse_toggled(self, on):
+        self._label_sorts(on)
+        self.refresh()
+        if self.state.reverse_sort != on:                   # the button is shared by every page
+            self.state.reverse_sort = on
+            self.state.reverse_changed.emit(on)
+
+    def _reverse_from_other(self, on):
+        if on == self.reverse_btn.isChecked():
+            return
+        self.reverse_btn.blockSignals(True)
+        self.reverse_btn.setChecked(on)
+        self.reverse_btn.blockSignals(False)
+        self.reverse_btn._paint()
+        self._label_sorts(on)
+        if self.isVisible():
+            self.refresh()
+        else:
+            self._resort = True                             # sorted when the page is next shown
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._resort:
+            self._resort = False
+            self.refresh()
 
     def refresh(self, *_):
+        in_dups = self.mode.value == "dups"
+        self._sync_hidden_sort()
+        if hasattr(self, "dup_btn"):
+            self.dup_btn.setText("Edit duplicates" if in_dups else "Resolve duplicates")
+            self.dup_btn.setToolTip("Change which copy is kept for every duplicate, including the ones already resolved" if in_dups
+                                    else "Find items that exist more than once (editions, with / without a year) and merge them")
         items = self.visible()
         self.model.set_items(items)
         total = len(self.all_items(hidden=self.mode.value == "hidden", dups=self.mode.value == "dups"))
@@ -839,7 +928,7 @@ class MediaPage(QWidget):
     def add_to_group(self, items, name):
         name = name or self._ask_group()
         if name and items:
-            n = self.state.groups.add(self.cat, name, [l for _, l in items])
+            n = self.state.add_group(self.cat, name, [l for _, l in items])
             self.log.emit(f"Group '{name}': +{n} item(s)")
             self.groups_changed.emit()
 
@@ -925,6 +1014,7 @@ class MediaPage(QWidget):
         if not many:
             menu.addAction(icons.icon("image", theme.MUTED, 16), "Replace poster...", lambda: self.replace_poster(labels[0]))
             menu.addAction(icons.icon("edit", theme.MUTED, 16), "Rename...", lambda: self.rename(labels[0]))
+            menu.addAction(icons.icon("tag", theme.MUTED, 16), "Edit metadata...", lambda: self.edit_metadata(labels[0]))
         menu.addAction(icons.icon("trash", theme.DANGER, 16), f"Remove {len(items)} from list" if many else "Remove from list",
                        lambda: self.remove_many(labels))
         menu.exec(self.view.viewport().mapToGlobal(pos))
@@ -972,7 +1062,9 @@ class MediaPage(QWidget):
 
     def merge_duplicates(self):
         from .dialogs import DuplicatesDialog
-        d = DuplicatesDialog(self.state, self.kind, self)
+        edit = self.mode.value == "dups"
+        only = {l for _, l in self.visible()} if edit else None          # editing: just the duplicates the filters show
+        d = DuplicatesDialog(self.state, self.cat, self, edit=edit, only=only)      # (a group page has no kind of its own, only a category)
         if d.exec() and d.changed:
             self.log.emit(f"Duplicates resolved: {d.changed} change(s)")
             self.state.changed.emit()
@@ -996,6 +1088,14 @@ class MediaPage(QWidget):
             self.lib.meta.set_name(label_, new.strip())
             self.lib.save()
             self.state.changed.emit()
+            self.data_changed.emit()
+
+    def edit_metadata(self, label_):
+        from .dialogs import MetadataDialog
+        d = MetadataDialog(self.state, self.cat, label_, self)
+        if d.exec() and d.changed:
+            self.state.changed.emit()
+            self.reload_facets()
             self.data_changed.emit()
 
     def remove(self, label_):

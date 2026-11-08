@@ -1,8 +1,10 @@
 """MusicBrainz: clean genres + country for an artist (free, no key; limited to ~1 request per second)."""
+import re
 import threading
 import time
 
-from .http import TIMEOUT, session
+from ..core.editions import base_key
+from .http import TIMEOUT, once, session
 from .lookups import country, country_language, title_case
 
 API = "https://musicbrainz.org/ws/2"
@@ -31,6 +33,53 @@ def find_artist_id(name):
     exact = [a for a in res if a.get("name", "").casefold() == name.casefold()]
     pick = (exact or res or [None])[0]
     return pick["id"] if pick else None
+
+
+def _key(title):
+    return re.sub(r"[^\w]+", " ", title.casefold()).strip()
+
+
+_groups = {}
+
+
+def artist_groups(mbid) -> list:
+    """[{id, title, year}] for the albums, EPs and singles of an artist (one request per 100 releases), asked once per artist:
+    the release-year lookup and the cover lookup both use it."""
+    return once(_groups, mbid, lambda: _artist_groups(mbid))
+
+
+def _artist_groups(mbid) -> list:
+    out, offset = [], 0
+    while offset < 500:
+        data = _get("release-group", artist=mbid, type="album|ep|single", limit=100, offset=offset)
+        for g in data.get("release-groups", []):
+            date = str(g.get("first-release-date") or "")
+            out.append({"id": g["id"], "title": g["title"], "year": int(date[:4]) if date[:4].isdigit() else None})
+        offset += 100
+        if offset >= data.get("release-group-count", 0):
+            break
+    return out
+
+
+def artist_years(mbid) -> dict:
+    """{title key: year of the first release}. Each title is stored plain and without edition words, so 'X (Deluxe)' finds the
+    year of 'X'."""
+    out = {}
+    for g in artist_groups(mbid):
+        if g["year"]:
+            for k in (_key(g["title"]), base_key(g["title"])):
+                out[k] = min(g["year"], out.get(k, g["year"]))
+    return out
+
+
+def group_for(groups, album):
+    """The release group of an album: the exact title first, else the one without edition words."""
+    by_title = [g for g in groups if _key(g["title"]) == _key(album)] or [g for g in groups if base_key(g["title"]) == base_key(album)]
+    return by_title[0] if by_title else None
+
+
+def year_of(years, album):
+    return years.get(_key(album)) or years.get(base_key(album))
 
 
 def artist_details(name, mbid=None) -> dict:

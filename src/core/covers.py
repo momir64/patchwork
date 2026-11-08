@@ -94,35 +94,37 @@ def _artist(lib, label) -> str:
 
 
 def similar(lib, labels) -> list:
-    """[[label, ...], ...]: albums by the same artist whose covers look the same (from cached hashes only)."""
+    """[[label, ...], ...]: albums whose covers look the same and that share the artist or the album title
+    (from cached hashes only)."""
+    from .editions import base_key
     data = _load(lib.kind)
-    by_artist = defaultdict(list)
+    items, buckets = [], defaultdict(list)
     for l in labels:
         p = lib.poster(l)
         hit = data.get(p.name) if p else None
         if hit and hit[2] is not None:
-            by_artist[_artist(lib, l)].append((l, hit[2]))
-    out = []
-    for items in by_artist.values():
-        if len(items) < 2:
-            continue
-        parent = list(range(len(items)))
+            i = len(items)
+            items.append((l, hit[2]))
+            buckets[("artist", _artist(lib, l))].append(i)
+            buckets[("title", base_key(lib.name(l)))].append(i)       # the same album under another artist spelling
+    parent = list(range(len(items)))
 
-        def find(i):
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
 
-        for i in range(len(items)):
-            for j in range(i + 1, len(items)):
+    for idx in buckets.values():
+        for x in range(len(idx)):
+            for y in range(x + 1, len(idx)):
+                i, j = idx[x], idx[y]
                 if (items[i][1] ^ items[j][1]).bit_count() <= MAX_DISTANCE:
                     parent[find(j)] = find(i)
-        groups = defaultdict(list)
-        for i, (l, _) in enumerate(items):
-            groups[find(i)].append(l)
-        out += [sorted(g, key=str.casefold) for g in groups.values() if len(g) > 1]
-    return out
+    groups = defaultdict(list)
+    for i, (l, _) in enumerate(items):
+        groups[find(i)].append(l)
+    return [sorted(g, key=str.casefold) for g in groups.values() if len(g) > 1]
 
 
 # ---- cover colors (for sorting albums by color) ------------------------------------------------------------------

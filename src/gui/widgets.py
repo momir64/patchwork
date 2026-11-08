@@ -4,6 +4,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox,
                                QSpacerItem, QVBoxLayout, QWidget)
 
+from ..core.names import fold
 from . import icons, theme
 
 
@@ -91,10 +92,10 @@ class SearchCombo(QComboBox):
     def _filter(self, text):
         if not self._searching():
             return
-        t = text.strip().casefold()
+        t = fold(text.strip())
         lst = self._list
         for r in range(lst.count()):
-            lst.item(r).setHidden(bool(t) and t not in lst.item(r).text().casefold())
+            lst.item(r).setHidden(bool(t) and t not in fold(lst.item(r).text()))
         for r in range(lst.count()):
             if not lst.item(r).isHidden():
                 lst.setCurrentRow(r)
@@ -108,6 +109,8 @@ class SearchCombo(QComboBox):
         idx = item.data(Qt.ItemDataRole.UserRole)
         self._close()
         self.setCurrentIndex(idx)
+        if not KEYBOARD:                                  # picked with the mouse: the field does not stay focused
+            QTimer.singleShot(0, lambda: (self.lineEdit().clearFocus(), self.clearFocus()))
 
     def _close(self):
         if not self._searching():

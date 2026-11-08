@@ -2,10 +2,10 @@
 (plus small replacements for the stock input / message boxes)."""
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainterPath, QPixmap, QRegion
-from PySide6.QtWidgets import (QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QVBoxLayout, QWidget)
 
-from ..core.config import ROOT
+from ..core.config import RES
 from . import icons, theme
 from . import widgets
 from .widgets import button, label
@@ -57,7 +57,7 @@ class TitleBar(DragBar):
         h.setContentsMargins(14, 0, 0, 0)
         h.setSpacing(10)
         logo = QLabel()
-        pm = QPixmap(str(ROOT / "assets" / "logo.png")).scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+        pm = QPixmap(str(RES / "assets" / "logo.png")).scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
                                                                 Qt.TransformationMode.SmoothTransformation)
         pm.setDevicePixelRatio(2.0)
         logo.setPixmap(pm)
@@ -210,6 +210,14 @@ class Polisher(QObject):
         super().__init__()
         self.keys = False
 
+    @staticmethod
+    def release_combo(combo):
+        """After a pick with the mouse the dropdown lets go of the focus (once the popup has finished closing)."""
+        if widgets.KEYBOARD:
+            return
+        for ms in (0, 80):
+            QTimer.singleShot(ms, lambda c=combo: c.clearFocus() if not c.view().isVisible() else None)
+
     def eventFilter(self, obj, ev):
         t = ev.type()
         if t == QEvent.Type.Polish and isinstance(obj, QWidget):
@@ -222,10 +230,25 @@ class Polisher(QObject):
                 obj.setProperty("_rounded", True)
                 box = obj.view().window()               # the popup frame: rounded with a mask, so no window changes are needed
                 box.installEventFilter(self)
+                obj.activated.connect(lambda _=0, c=obj: self.release_combo(c))        # mouse users: no focus left behind
+        elif t == QEvent.Type.Hide and isinstance(obj, QWidget) and obj.metaObject().className() == "QComboBoxPrivateContainer":
+            if isinstance(obj.parentWidget(), QComboBox):         # the popup closed: Qt hands the focus back to the dropdown
+                self.release_combo(obj.parentWidget())
         elif t in (QEvent.Type.Show, QEvent.Type.Resize) and isinstance(obj, QWidget) and                 obj.metaObject().className() == "QComboBoxPrivateContainer":
             path = QPainterPath()
             path.addRoundedRect(QRectF(obj.rect()), theme.RADIUS, theme.RADIUS)
             obj.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        elif t == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget):
+            combo = QApplication.focusWidget()                  # a click anywhere else lets go of a focused dropdown
+            while combo is not None and not isinstance(combo, QComboBox):
+                combo = combo.parentWidget()
+            if combo is not None:
+                w, inside = obj, False
+                while w is not None and not inside:
+                    inside = w is combo or w is combo.view().window()
+                    w = w.parentWidget()
+                if not inside:
+                    combo.clearFocus()
         elif t == QEvent.Type.KeyPress and not self.keys and ev.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
             self.keys = True
             for w in QGuiApplication.instance().allWidgets():

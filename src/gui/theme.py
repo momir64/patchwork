@@ -1,12 +1,12 @@
 """Design tokens + the application stylesheet (dark). 8px spacing grid, 8px control radius, 34px control height."""
-from pathlib import Path
+from ..core.config import RES
 
 BG, SURFACE, SURFACE2, BORDER = "#0d0f14", "#14171f", "#1b1f2b", "#262b3b"
 SIDEBAR = "#080a0e"      # darker than the content area, so the bottom bar never merges into it
 TEXT, MUTED, DIM = "#e8eaf0", "#8b93a7", "#5d657a"
 ACCENT, ACCENT_H, ACCENT_SOFT, GOLD = "#8b6cff", "#9d83ff", "#2a2450", "#ffc933"
 DANGER = "#ff6b81"
-ASSETS = (Path(__file__).resolve().parents[2] / "assets").as_posix()
+ASSETS = (RES / "assets").as_posix()
 RADIUS, HEIGHT, GAP = 8, 34, 8
 FONT = '"Segoe UI Variable Text", "Segoe UI", "Inter", sans-serif'
 
