@@ -1,57 +1,125 @@
 # Patchwork
 
-Patchwork is a desktop app that turns the shows, movies and albums you've consumed into balanced poster and album-cover
-collages. It syncs your library from Sonarr, Radarr, Trakt and Last.fm, stores lists, favorites and metadata as plain
-text and JSON, and lets you build collages from favorites or custom groups like "Sci-fi" or "Metal", in any aspect ratio.
+A desktop app that collects the shows, movies and albums you watch and listen to, and turns them into poster collages.
 
-    pip install -r requirements.txt
-    run.bat                      # or: python main.py
+![Patchwork library](docs/screenshots/library.png)
 
-## Connect your services
-**Settings** in the app (or `.env`): Sonarr, Radarr, Trakt (Client ID + public username), Last.fm, TMDB. Each has a *Test connection* button.
+## Overview
 
-- **Trakt favorites**: off by default. Turn on *Let Trakt sync change my favorites* to mark titles you rated at or above a
-  threshold as favorites. With it off, syncing never touches your favorites.
-- **Albums to import** (`LASTFM_LIMIT`): how many of your most played albums (ranked by play count) to import from Last.fm.
-  Default 1024, no upper limit, `0` imports all of them.
+Patchwork pulls your libraries from the services where they already live, lets you organize and clean them up, and
+renders the result as a poster collage. Everything is stored locally as plain JSON and image files.
 
-## Sync - choose exactly what to update
-- **Sync** button (bottom of the sidebar) runs your last choice; the sliders button next to it opens the options.
-- Pick **sources** (Sonarr, Radarr, Trakt shows / movies, Last.fm), **steps** (new titles, missing posters, missing metadata,
-  optionally re-fetch metadata) and which **media types** get posters / metadata.
-- Album genres and countries come from MusicBrainz (about one artist per second, so the first run takes a while); Last.fm tags
-  are the fallback. Serbian, Croatian and Bosnian are treated as one language (Serbo-Croatian).
-- Nothing is ever deleted by a sync. CLI: `python main.py sync sonarr --only posters --kinds shows`.
+It is written in Python with PySide6 (Qt) and also ships with a command-line interface.
 
-## Using it
-- **Shows / Movies / Albums**: click posters to select (shift-click = range, *Select all* toggles to *Unselect all*), click the
-  star for favorites, filter by genre / country / language / group, right-click for rename / replace poster / groups.
-  Favoriting or unfavoriting several titles at once asks for confirmation. Renames are remembered in `data/aliases.txt`
-  so syncs don't re-add the old name. Posters grow to fill the window width.
-- **Groups** live under their category in the sidebar, like subfolders. A group belongs to exactly one category. Create one
-  with the **+** next to a category, or with *Add to group* on selected titles. Right-click a group to make a collage, rename or delete it.
-- **Collage** (button above Sync): opens with what you were just looking at (selection, otherwise everything shown) as
-  *Current view*; or choose all items, favorites or a group of the chosen media type. Order (A-Z, Z-A, shuffle, or by color / lightness running vertically, horizontally or diagonally), justified rows or even grid,
-  aspect ratio (2:3, 3:4, 4:5, 1:1, 16:9, with Portrait/Landscape switch), size, gap, color. The preview always shows the whole
-  collage; *Generate* writes the full image to `data/output`. Rows are balanced automatically, so the last row is never stretched.
-- The window resizes down to 720 px wide (the sidebar collapses to icons) and opens on the monitor your mouse is on.
+## Features
 
-## Export / import
-**Settings > Your data**: export everything media related (lists, favorites, metadata, groups, name fixes) to one file.
-`.zip` includes the posters, `.json` is data only. Import merges into what you have and never deletes. Secrets are not exported.
-CLI: `python main.py export backup.zip`, `python main.py import backup.zip`.
+- **Syncing.** Sonarr and Radarr for what you own, Trakt for what you have watched and rated, Last.fm and Spotify data
+  exports for what you listen to. Posters and details come from those sources, with TMDB, MusicBrainz, Deezer and
+  iTunes as fallbacks.
+- **Browsing.** Shows, movies and albums each get their own library. Search, filter by genre, country, language or
+  group, and sort by year, rating, date added or cover color.
+- **Organizing.** Favorites, custom groups (drag to reorder), renaming, hiding, and a duplicate finder that catches
+  editions of the same item by name, shared IDs and visually similar covers.
+- **Collages.** Build from favorites, a group, a selection or everything. Justified rows or a fixed grid, any aspect
+  ratio, ordered A-Z, shuffled or by color. The live preview re-renders at full detail as you zoom in.
 
-## Terminal
-    python main.py sync [sonarr|radarr|trakt|lastfm] [--only titles posters metadata] [--kinds shows movies albums]
-    python main.py list shows --favs
-    python main.py collage shows --favs --aspect 2:3 --width 4000 [--landscape] [--grid] [--order hue --direction diagonal]
-    python main.py import-legacy <old series_collage folder>
+![Filters and selection](docs/screenshots/filters.png)
 
-## Where things live
-    src/core       config, lists, metadata, groups
-    src/sources    one module per service (arr, trakt, tmdb, lastfm, musicbrainz) + sync.py
-    src/collage    layout.py (balancing maths) and render.py (images)
-    src/gui        app, sidebar, media_page (libraries + groups), collage_page, dialogs, widgets, icons, theme
-    tools/         make_icon.py (regenerates assets/icon.png + icon.ico)
-    data/<shows|movies|albums>/   list.txt  favorites.txt  meta.json  posters/  groups/<name>.txt
-    data/aliases.txt  data/ui.json  data/output/
+## Collages
+
+| Shows | Albums |
+| --- | --- |
+| ![Shows collage](docs/collages/shows.jpg) | ![Albums collage, sorted by color](docs/collages/albums.jpg) |
+
+![Albums collage, sorted by color](docs/collages/color.jpg)
+
+## Setup
+
+Requires Python 3.10 or newer.
+
+```
+pip install -r requirements.txt
+python main.py        # or run.bat on Windows
+```
+
+Open **Settings** and enter the details for the services you use. None of them is required, and each has a *Test
+connection* button. The same values can be placed in a `.env` file (see `.env.example`).
+
+| Service | What you need |
+| --- | --- |
+| Sonarr / Radarr | address and API key |
+| Trakt | a Client ID from your own Trakt app, and your public username |
+| Last.fm | an API key and your username |
+| TMDB | an API key, used for missing posters and details |
+| Spotify | no key; import the data export you can request from your account |
+
+Press **Sync** in the sidebar. The first run is slow, mostly because album genres and countries come from MusicBrainz
+at about one artist per second. Later syncs only fetch what is new.
+
+## Usage
+
+1. **Sync** to fill the libraries.
+2. **Browse** the pages, star favorites and add items to groups. Right-click for rename, hide and remove.
+3. **Clean up** with the *Duplicates* button on each page.
+4. Open **Collage**, choose a shape, size and order, then press *Generate collage*. The image is written to
+   `data/output`.
+
+![Collage page](docs/screenshots/collage.png)
+
+Some defaults to be aware of: syncing only adds items and never removes them; Radarr only adds movies that are
+unmonitored (configurable in Settings); and Trakt never changes your favorites unless you enable it.
+
+## Building a standalone executable
+
+`build.bat` packages the app with PyInstaller (it installs PyInstaller and the requirements first). The build is
+described in `patchwork.spec` and produces two single-file executables:
+
+```
+build.bat
+```
+
+| File | Purpose |
+| --- | --- |
+| `dist\patchwork.exe` | the GUI, opens without a console window |
+| `dist\patchwork-cli.exe` | the command-line interface (see below), a smaller console build without Qt |
+
+Both keep their `.env` and `data/` folder next to themselves, so they can be moved around together or run from a USB
+stick. When packaged, use `patchwork-cli.exe` in place of `python main.py` in the commands below.
+
+## Command line
+
+Syncing and collages also work without the GUI:
+
+```
+python main.py sync [sonarr|radarr|trakt|lastfm]
+python main.py collage shows --favs --aspect 2:3 --width 4000
+python main.py collage albums --order hue --direction diagonal
+python main.py export backup.zip
+python main.py --help
+```
+
+## Data
+
+Everything lives in `data/` next to the app: one folder per media type containing `library.json`, `meta.json`,
+`groups.json` and a `posters/` folder, plus `output/` for generated collages. **Settings -> Your data** exports all of
+it to a single file (API keys excluded) and imports it back.
+
+## Project layout
+
+```
+src/core       library, metadata, groups, duplicates, storage
+src/sources    one module per service, plus sync.py
+src/collage    layout (row balancing) and rendering
+src/gui        the Qt app
+```
+
+The poster grid is a custom-painted list view rather than thousands of widgets, which keeps the interface responsive
+with libraries of tens of thousands of items. Most of that lives in `src/gui/media_page.py`.
+
+## Troubleshooting
+
+If the application crashes, a traceback is written to `data/crash.log`. Suggestions and bug reports are welcome.
+
+## License
+
+[TWAORPWB](LICENSE): thou wilt at own risk, praise with beer.
