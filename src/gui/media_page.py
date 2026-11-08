@@ -187,7 +187,7 @@ class CardDelegate(QStyledItemDelegate):
         if out is None:
             if len(self._lines_cache) > 4000:
                 self._lines_cache.clear()
-            out = self._lines_cache[key] = two_lines(self._title_fm, text, w)
+            out = self._lines_cache[key] = two_lines(self._title_fm, text, w - 3)     # a little slack: the painter's metrics can differ by a pixel or two
         return out
 
     def scaled(self, pm, size, mode):
@@ -273,7 +273,10 @@ class CardDelegate(QStyledItemDelegate):
         p.setFont(self._title_font)
         y = pr.bottom() + self.GAP
         p.setPen(QColor(theme.TEXT if selected else "#d5d9e6"))
+        pfm = p.fontMetrics()
         for line in self.lines(index.data() or "", tw):
+            if pfm.horizontalAdvance(line) > tw:               # measured with the painter itself, so nothing is ever clipped
+                line = pfm.elidedText(line, Qt.TextElideMode.ElideRight, tw)
             p.drawText(QRect(tx, y, tw, 17), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
             y += 17
         y += 1
@@ -294,6 +297,16 @@ class CardView(QListView):
     cardClicked = Signal(QModelIndex, object)
     starClicked = Signal(QModelIndex)
     emptyClicked = Signal()
+    zoomWheel = Signal(int)                                 # Ctrl + wheel: +1 per notch up (bigger), -1 per notch down
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            steps = e.angleDelta().y() / 120
+            if steps:
+                self.zoomWheel.emit(1 if steps > 0 else -1)
+            e.accept()
+            return
+        super().wheelEvent(e)
 
     def __init__(self, delegate):
         super().__init__()
@@ -497,6 +510,11 @@ class MediaPage(QWidget):
         redo = QShortcut(QKeySequence.StandardKey.Redo, self)          # Ctrl+Y / Ctrl+Shift+Z
         redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         redo.activated.connect(lambda: self.undo_selection(redo=True))
+        for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):      # item size, like a browser's zoom
+            zs = QShortcut(QKeySequence(keys), self)
+            zs.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            zs.activated.connect(lambda step=step: self.zoom_by(step))
+        self.view.zoomWheel.connect(self.zoom_by)
         self.btn_unlink.setParent(self)
         self.btn_unlink.setVisible(bool(group))
         actions = QWidget()
@@ -782,6 +800,10 @@ class MediaPage(QWidget):
         self.view.apply_zoom()
         self.state.set_pref("zoom", w)
         self.state.zoom_changed.emit(w)
+
+    def zoom_by(self, step):
+        """Ctrl +/- / Ctrl + wheel change the poster size; Ctrl+0 (step 0) goes back to the default."""
+        self.zoom.setValue(170 if step == 0 else min(self.zoom.maximum(), max(self.zoom.minimum(), self.zoom.value() + 10 * step)))
 
     def _zoom_from_other(self, w):
         if w != self.delegate.base:
