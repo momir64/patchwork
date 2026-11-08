@@ -687,9 +687,9 @@ class MediaPage(QWidget):
         return items[::-1] if rev else items
 
     def _sort_rank(self, sort):
-        """Menu order: alphabetical, except that albums list Title first and Artist second."""
+        """Menu order: alphabetical, except that Title comes first (and Artist second, for albums)."""
         text, _, key = sort
-        first = ("az", "artist").index(key) if self.cat == "albums" and key in ("az", "artist") else 2
+        first = ("az", "artist").index(key) if key in ("az", "artist") else 2
         return first, text.casefold()
 
     def _label_sorts(self, on):
