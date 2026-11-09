@@ -55,19 +55,16 @@ connection* button. The same values can be placed in a `.env` file (see `.env.ex
 | Trakt | a Client ID from your own Trakt app, and your public username |
 | Last.fm | an API key and your username |
 | TMDB | an API key, used for missing posters and details |
-| Spotify | your own free Spotify app (see below). Sync then reads your saved albums and top songs (liked songs and playlists are optional), and the app also supplies album release years and missing covers |
-| Spotify data export | no key; *Import from file* on the same page imports the data export (JSON files) you can request from your account. It is preferred for large playlists and saved libraries |
+| Spotify account | your own free Spotify app (see below), for syncing saved albums and top songs and for release years and covers |
+| Spotify file import | nothing to set up; import the data export you can request from Spotify, better for large libraries |
 
-To set up Spotify:
+To set up the Spotify account:
 
-1. Create a free app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
-2. Add `http://127.0.0.1:8765/callback` to the app's redirect URIs.
-3. Paste its Client ID and secret on the **Spotify** page in Settings and press *Sign in*. Your browser opens to
-   approve access.
-4. Choose what to import from the account. Top songs are on by default.
+1. Create a free app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard) and add the redirect URI from the settings.
+2. Paste its Client ID and secret on the **Spotify** page in the app Settings and press *Sign in*.
+3. Choose what to import. Top songs are on by default.
 
-API keys and the Spotify sign-in are stored in plain text in `.env` and `data/`, so keep those out of version control
-and out of any folder you share.
+API keys and the Spotify sign-in are stored in plain text in `.env` and `data/`.
 
 Press **Sync** in the sidebar. The first run is slow, mostly because album genres, countries and release years come
 from MusicBrainz at about one artist per second. Later syncs only fetch what is new. The button next to it opens the
