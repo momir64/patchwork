@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QScrol
                                QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from ..collage import render
-from ..core import editions
 from ..core.config import OUTPUT_DIR
 from .colorpicker import pick_color
 from . import icons, theme
@@ -15,12 +14,26 @@ from .common import Job, pil_to_qimage
 from .widgets import Btn, ProgressLine, UnitSpin, Chips, Segmented, button, divider, form_row, label, section_header, stacked_row
 
 ALL_MEDIA = "All media"
-SOURCES = {"Albums": ["albums"], ALL_MEDIA: ["shows", "movies", "albums"], "Movies": ["movies"], "Shows": ["shows"]}   # Albums is the default
+SOURCES = {ALL_MEDIA: ["shows", "movies", "albums"], "Albums": ["albums"], "Movies": ["movies"], "Shows": ["shows"]}   # Albums is the default
+DEFAULT_SOURCE = "Albums"
 SCOPES = (("Favorites", "favs"), ("Group", "group"), ("Selection", "picks"))      # after the default "All items", A-Z
 COLOR_FROM = (("Average", "average"), ("Dominant", "dominant"), ("Accent", "accent"))
 KIND_TITLES = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
 RATIOS = (("Free", ""), ("16:9", "16:9"), ("2:3", "2:3"), ("3:4", "3:4"), ("4:5", "4:5"), ("1:1", "1:1"))   # Free, then farthest from square to square
 PREVIEW_WIDTH = 1500
+
+
+def tip(widget, text):
+    widget.setToolTip(text)
+    return widget
+
+
+def option_tips(control, tips, default=None):
+    """A tooltip per option of a Segmented / Chips control, so hovering an option explains that option."""
+    for value, button in control.buttons.items():
+        text = tips.get(value, default)
+        if text:
+            button.setToolTip(text)
 
 
 def spin(lo, hi, val, suffix="", special=None):
@@ -230,20 +243,25 @@ class CollagePage(QWidget):
         # ------------------------------------------------ controls
         self.source = QComboBox()
         self.source.addItems(SOURCES)
+        self.source.setCurrentText(DEFAULT_SOURCE)
         self.scope = QComboBox()
         self.group = QComboBox()
         self.picks_lbl = label("", "muted", wrap=True)
         self.order = Segmented([("A–Z", "az"), ("Z–A", "za"), ("Shuffle", "shuffle"), ("Color", "hue"), ("Light", "bright")], "az")
         self.direction = Segmented([("Vertical", "vertical"), ("Horizontal", "horizontal"), ("Diagonal", "diagonal")], "vertical")
-        self.direction.setToolTip("Which way the colors run across the collage")
+        option_tips(self.direction, {"vertical": "Colors change from top to bottom.", "horizontal": "Colors change from left to right.",
+                                     "diagonal": "Colors change from corner to corner."})
         self.color_from = Segmented(list(COLOR_FROM), "average")
-        self.color_from.setToolTip(chr(10).join(f"{t}: {render.COLOR_MODES[k]}" for t, k in COLOR_FROM))
+        option_tips(self.color_from, {"average": "Mean color of the whole cover.", "dominant": "The most common hue of the cover.",
+                                      "accent": "The most colorful part of the cover."})
         self.reverse = Btn("", "sort", "toggle", "Reverse the order", size=16, pad=0)
         self.reverse.setCheckable(True)
         self.reverse.setFixedWidth(theme.HEIGHT + 2)
-        self.fit = Segmented([("Keep shape", "keep"), ("Fill (crop)", "crop")], "keep")
-        self.fit.setToolTip("Keep shape: posters are only resized, never cropped or stretched. Fill: every poster fills its cell exactly (crops edges).")
-        self.order.buttons["shuffle"].setToolTip("Click again to shuffle again")
+        self.fit = Segmented([("Keep whole", "keep"), ("Crop to fit", "crop")], "keep")
+        option_tips(self.fit, {"keep": "Posters are never cropped. In the even grid, odd shapes leave some background.",
+                               "crop": "Posters fill their cells, edges are trimmed a little."})
+        option_tips(self.order, {"az": "Alphabetical, A to Z.", "za": "Alphabetical, Z to A.", "shuffle": "Random order. Click again to reshuffle.",
+                                 "hue": "By cover color.", "bright": "By cover brightness."})
         self.order.reclicked.connect(lambda v: self.new_seed() if v == "shuffle" else None)
 
         self.mode = Segmented([("Justified rows", "justified"), ("Even grid", "grid")], "justified")
@@ -252,14 +270,12 @@ class CollagePage(QWidget):
                                 {"portrait": "portrait", "landscape": "landscape"})
         self.row_h = spin(60, 2000, 300, " px")
         self.cols = spin(0, 200, 0, "", "Auto")
-        self.dedupe = QCheckBox("One cover per album")
-        self.dedupe.setChecked(True)
-        self.dedupe.setToolTip("Albums that exist as Deluxe / Remastered / Explicit editions appear only once (the favorite or most played one)")
-        self.balance = QCheckBox("Auto-balance rows")
-        self.balance.setChecked(True)
-        self.balance.setToolTip("Tries many row heights and keeps the one where all rows, including the last, match best")
         self.equal = QCheckBox("Equal row heights (crops a little)")
         self.equal.setChecked(True)
+        self.equal.setToolTip("Give every row the same height by trimming posters slightly.")
+        option_tips(self.mode, {"justified": "Rows of equal height, posters keep their shape.", "grid": "Same-sized cells in even columns."})
+        option_tips(self.ratio, {"": "No fixed shape, it follows the posters."}, "Make the whole collage this shape.")
+        option_tips(self.orient, {"portrait": "Taller than wide.", "landscape": "Wider than tall."})
         self.width_ = spin(600, 30000, 4000, " px")
         self.gap = spin(0, 100, 0, " px")
         self.margin = spin(0, 400, 0, " px")
@@ -268,6 +284,7 @@ class CollagePage(QWidget):
         self.color.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.color.clicked.connect(self.pick_color)
         self.fmt = Segmented([("PNG", "PNG"), ("JPEG", "JPEG")], "PNG")
+        option_tips(self.fmt, {"PNG": "Lossless, larger files.", "JPEG": "Smaller files, slight quality loss."})
         self.quality = spin(50, 100, 92)
 
         # ------------------------------------------------ right panel
@@ -277,13 +294,12 @@ class CollagePage(QWidget):
         v.setContentsMargins(20, 20, 18, 20)
         v.setSpacing(10)
         v.addWidget(section_header("Source"))
-        v.addWidget(form_row("Media", self.source))
-        v.addWidget(form_row("Include", self.scope))
-        self.row_group = form_row("Group", self.group)
+        v.addWidget(tip(form_row("Media", self.source), "Which library the posters come from."))
+        v.addWidget(tip(form_row("Include", self.scope), "Which titles to use."))
+        self.row_group = tip(form_row("Group", self.group), "Use the titles of this group.")
         v.addWidget(self.row_group)
         v.addWidget(self.picks_lbl)
-        v.addWidget(self.dedupe)
-        v.addWidget(stacked_row("Order", self.order))
+        v.addWidget(tip(stacked_row("Order", self.order), "How posters are ordered. Color and Light sort by cover."))
         self.row_from = stacked_row("Color from", self.color_from)
         v.addWidget(self.row_from)
         dir_row = QWidget()
@@ -292,37 +308,36 @@ class CollagePage(QWidget):
         dh.setSpacing(8)
         dh.addWidget(self.direction, 1)
         dh.addWidget(self.reverse)
-        self.row_dir = stacked_row("Color direction", dir_row)
+        self.row_dir = tip(stacked_row("Color direction", dir_row), "Which way the colors run across the collage.")
         v.addWidget(self.row_dir)
         v.addSpacing(6)
         v.addWidget(divider())
         v.addSpacing(6)
         v.addWidget(section_header("Shape"))
         v.addWidget(self.mode)
-        v.addWidget(stacked_row("Posters", self.fit))
+        v.addWidget(tip(stacked_row("Posters", self.fit), "How posters fit their cells."))
         v.addWidget(label("Aspect ratio", "muted"))
         v.addWidget(self.ratio)
         v.addWidget(self.orient)
-        self.row_rowh = form_row("Row height", self.row_h)
-        self.row_cols = form_row("Columns", self.cols)
+        self.row_rowh = tip(form_row("Row height", self.row_h), "Wanted height of each row. It can vary a little to balance the rows.")
+        self.row_cols = tip(form_row("Columns", self.cols), "Posters per row. Auto picks it for you.")
         v.addWidget(self.row_rowh)
         v.addWidget(self.row_cols)
-        v.addWidget(self.balance)
         v.addWidget(self.equal)
         v.addSpacing(6)
         v.addWidget(divider())
         v.addSpacing(6)
         v.addWidget(section_header("Size & style"))
-        v.addWidget(form_row("Width", self.width_))
-        v.addWidget(form_row("Gap", self.gap))
-        v.addWidget(form_row("Margin", self.margin))
-        v.addWidget(form_row("Background", self.color))
+        v.addWidget(tip(form_row("Width", self.width_), "Width of the final image."))
+        v.addWidget(tip(form_row("Gap", self.gap), "Space between posters."))
+        v.addWidget(tip(form_row("Margin", self.margin), "Space around the edge."))
+        v.addWidget(tip(form_row("Background", self.color), "Color behind and around the posters."))
         v.addSpacing(6)
         v.addWidget(divider())
         v.addSpacing(6)
         v.addWidget(section_header("Output"))
         v.addWidget(self.fmt)
-        self.row_quality = form_row("Quality", self.quality)
+        self.row_quality = tip(form_row("Quality", self.quality), "JPEG quality. Higher looks better and is larger.")
         v.addWidget(self.row_quality)
         v.addStretch()
         scroll = QScrollArea()
@@ -392,7 +407,7 @@ class CollagePage(QWidget):
             w.currentIndexChanged.connect(self.changed)
         for w in (self.order, self.direction, self.color_from, self.fit, self.mode, self.ratio, self.orient, self.fmt):
             w.changed.connect(self.changed)
-        for w in (self.balance, self.equal, self.reverse, self.dedupe):
+        for w in (self.equal, self.reverse):
             w.toggled.connect(self.changed)
         for w in (self.row_h, self.cols, self.width_, self.gap, self.margin, self.quality):
             w.valueChanged.connect(self.changed)
@@ -495,18 +510,14 @@ class CollagePage(QWidget):
     def options(self) -> render.Options:
         return render.Options(
             mode=self.mode.value, width=self.width_.value(), gap=self.gap.value(), margin=self.margin.value(),
-            row_height=self.row_h.value(), auto_balance=self.balance.isChecked(), equal_rows=self.equal.isChecked(),
+            row_height=self.row_h.value(), equal_rows=self.equal.isChecked(),
             columns=self.cols.value(), aspect=render.aspect_from(self.ratio.value, self.orient.value == "landscape"),
             order=self.order.value, direction=self.direction.value, color_mode=self.color_from.value, reverse=self.reverse.isChecked(),
             fit=self.fit.value, seed=self.seed, bg=(self.bg.red(), self.bg.green(), self.bg.blue()),
             fmt=self.fmt.value, quality=self.quality.value())
 
     def pool(self):
-        items = self.state.pool(SOURCES[self.source.currentText()], self.scope.currentData(), self.group_value())
-        if self.dedupe.isChecked():
-            lib = self.state.libs["albums"]
-            items = editions.dedupe(items, lib.is_fav, lambda l: lib.meta.get(l).get("playcount", 0) or 0)
-        return items
+        return self.state.pool(SOURCES[self.source.currentText()], self.scope.currentData(), self.group_value())
 
     def relabel_ratios(self):
         """Portrait shows short:long (2:3), landscape long:short (3:2); the value behind each chip never changes."""
@@ -527,21 +538,28 @@ class CollagePage(QWidget):
         self.row_dir.setVisible(colored)
         self.row_from.setVisible(self.order.value == "hue")
         crop = self.fit.value == "crop"
-        self.dedupe.setVisible("albums" in SOURCES[self.source.currentText()])
         self.orient.setEnabled(not free and not square)
         self.row_rowh.setVisible(not grid and free)
-        self.balance.setVisible(not grid and free)
         self.equal.setVisible(not grid and free and crop)
         self.row_cols.setVisible(grid)
         self.row_quality.setVisible(self.fmt.value == "JPEG")
+        if self.running and getattr(self.running, "preview", False):
+            self.running.cancel()                          # the preview being built is out of date: stop it, a new one starts shortly
+            self.rerun = True
         self.timer.start()
 
     # ------------------------------------------------------------ rendering
-    def _prepare(self, pool, o):
-        by_key = {f"{k}:{l}": p for k, l, p in pool if render.readable(p)}
-        order = render.order_items(list(by_key), o.order, o.seed, by_key, o.color_mode, o.reverse)
+    def _prepare(self, pool, o, check=None):
+        """check: called often while working; it raises when the preview was cancelled."""
+        by_key = {}
+        for k, l, p in pool:
+            if check:
+                check()
+            if render.readable(p):
+                by_key[f"{k}:{l}"] = p
+        order = render.order_items(list(by_key), o.order, o.seed, by_key, o.color_mode, o.reverse, check)
         paths = [by_key[k] for k in order]
-        layout = render.make_layout(paths, o)
+        layout = render.make_layout(paths, o, check)
         if o.order in ("hue", "bright"):
             paths = render.arrange(paths, layout, o.direction)
         return paths, layout
@@ -568,18 +586,24 @@ class CollagePage(QWidget):
 
         def work(progress):
             progress(0, 1)
-            paths, layout = self._prepare(pool, o)
+            paths, layout = self._prepare(pool, o, lambda: progress(0, 1))        # raises as soon as the preview is cancelled
+            progress(0, 1)                                # a cancelled preview stops here instead of rendering
             small = layout.scaled(min(1.0, PREVIEW_WIDTH / layout.width))
-            return layout, pil_to_qimage(render.render(paths, small, o.bg, progress)), (paths, layout, o.bg)
+            img = render.render(paths, small, o.bg, progress)
+            size = render.estimate_size(img, layout.width, layout.height, o)
+            return layout, pil_to_qimage(img), (paths, layout, o.bg), size
 
-        self._run(work, self.preview_done, self.preview.show_text, lambda a, b: self.info.setText(f"Building preview... {100 * a // max(1, b)}%"))
+        self._run(work, self.preview_done, self.preview.show_text, lambda a, b: self.info.setText(f"Building preview... {100 * a // max(1, b)}%"),
+                  preview=True)
         self.info.setText("Building preview... 0%")
 
     def preview_done(self, res):
-        layout, qimg, src = res
+        layout, qimg, src, size = res
         self.preview.show_pixmap(QPixmap.fromImage(qimg), src)
         crop = f"  ·  crop up to {layout.spread:.1%}" if layout.spread else ""
-        self.info.setText(f"{len(layout.cells)} items  ·  {layout.rows} rows  ·  {layout.width} × {layout.height}px  ·  ratio {layout.width / layout.height:.2f}{crop}")
+        mb = size / 1048576
+        approx = f"~{mb:.1f} MB" if mb >= 1 else f"~{max(1, round(size / 1024))} KB"
+        self.info.setText(f"{len(layout.cells)} items  ·  {layout.rows} rows  ·  {layout.width} × {layout.height}px  ·  ratio {layout.width / layout.height:.2f}  ·  {approx}{crop}")
 
     def render_detail(self, region, s, gen):
         """Re-render the zoomed-in part of the preview from the full-size layout (one at a time, newest request wins)."""
@@ -604,8 +628,9 @@ class CollagePage(QWidget):
         job.finished.connect(job.deleteLater)
         job.start()
 
-    def _run(self, fn, ok, bad, progress=None):
+    def _run(self, fn, ok, bad, progress=None, preview=False):
         job = Job(fn)
+        job.preview = preview
         self.running = job
         self.jobs.append(job)
 

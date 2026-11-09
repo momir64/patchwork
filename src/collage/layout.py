@@ -78,7 +78,7 @@ def _spans(weights, usable, gap, x0):
     return [(x0 + edges[k] + gap * k, edges[k + 1] - edges[k]) for k in range(len(weights))]
 
 
-def justified(ratios, width, gap=4, margin=0, target_h=300, auto=True, equal_rows=True, aspect=0.0, keep=False) -> Layout:
+def justified(ratios, width, gap=4, margin=0, target_h=300, auto=True, equal_rows=True, aspect=0.0, keep=False, check=None) -> Layout:
     """aspect = wanted overall width/height of the collage (0 = free, use target_h instead).
 
     With an aspect, the number of rows and row height are searched so the finished collage lands on that shape;
@@ -106,6 +106,8 @@ def justified(ratios, width, gap=4, margin=0, target_h=300, auto=True, equal_row
 
     results = []
     for H in candidates:
+        if check:
+            check()                                   # may raise to stop early (a cancelled preview)
         rows = _partition(ratios, prefix, avail, gap, H)
         hs = _row_heights(rows, prefix, avail, gap)
         if aspect and keep:

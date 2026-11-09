@@ -1,4 +1,5 @@
 """Shared GUI helpers: background jobs and thumbnail loading."""
+import time
 from collections import OrderedDict
 
 from PIL import Image
@@ -11,6 +12,10 @@ def pil_to_qimage(img: Image.Image) -> QImage:
     return QImage(img.tobytes(), img.width, img.height, 3 * img.width, QImage.Format.Format_RGB888).copy()
 
 
+class Cancelled(Exception):
+    pass
+
+
 class Job(QThread):
     """Runs fn(progress_cb) in a thread. Keep a reference while running."""
     done = Signal(object)
@@ -20,10 +25,27 @@ class Job(QThread):
     def __init__(self, fn, parent=None):
         super().__init__(parent)
         self.fn = fn
+        self.cancelled, self._last_emit = False, 0.0
+
+    def cancel(self):
+        """Stop at the next progress report; neither done nor failed is emitted."""
+        self.cancelled = True
+
+    def _progress(self, a, b):
+        if self.cancelled:
+            raise Cancelled()
+        now = time.monotonic()
+        if a >= b or now - self._last_emit >= 0.05:          # frequent callers (every item) do not flood the interface
+            self._last_emit = now
+            self.progress.emit(a, b)
 
     def run(self):
         try:
-            self.done.emit(self.fn(lambda a, b: self.progress.emit(a, b)))
+            res = self.fn(self._progress)
+            if not self.cancelled:
+                self.done.emit(res)
+        except Cancelled:
+            pass
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
 

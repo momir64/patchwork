@@ -1,9 +1,9 @@
 """Window chrome drawn by the app itself: title bar with window buttons, edge resizing, and frameless modal dialogs
 (plus small replacements for the stock input / message boxes)."""
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainterPath, QPixmap, QRegion
+from PySide6.QtGui import QColor, QCursor, QFontMetrics, QGuiApplication, QPainterPath, QPixmap, QRegion
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QToolTip, QVBoxLayout, QWidget)
 
 from ..core.config import RES
 from . import icons, theme
@@ -218,8 +218,30 @@ class Polisher(QObject):
         for ms in (0, 80):
             QTimer.singleShot(ms, lambda c=combo: c.clearFocus() if not c.view().isVisible() else None)
 
+    TIP_WIDTH = 230
+
+    @classmethod
+    def wrap_tip(cls, text):
+        """Plain tooltips are broken into lines of at most TIP_WIDTH pixels (existing line breaks stay)."""
+        fm = QFontMetrics(QToolTip.font())
+        out = []
+        for para in text.split("\n"):
+            line = ""
+            for word in para.split(" "):
+                trial = f"{line} {word}" if line else word
+                if line and fm.horizontalAdvance(trial) > cls.TIP_WIDTH:
+                    out.append(line)
+                    line = word
+                else:
+                    line = trial
+            out.append(line)
+        return "\n".join(out)
+
     def eventFilter(self, obj, ev):
         t = ev.type()
+        if t == QEvent.Type.ToolTip and isinstance(obj, QWidget) and obj.toolTip() and "<" not in obj.toolTip():
+            QToolTip.showText(ev.globalPos(), self.wrap_tip(obj.toolTip()), obj)         # a narrow tooltip instead of one long line
+            return True
         if t == QEvent.Type.Polish and isinstance(obj, QWidget):
             if isinstance(obj, QMenu) and not obj.property("_rounded"):    # menus: rounded, translucent popup window
                 obj.setProperty("_rounded", True)

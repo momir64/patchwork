@@ -226,13 +226,3 @@ def sweep(lib) -> bool:
         save_dup_hidden(kind, keep)
         lib.save()
     return changed
-
-
-def dedupe(items, is_fav=lambda l: False, plays=lambda l: 0):
-    """items: [(kind, label, path)] -> the same list with one edition per album (albums only; other kinds untouched)."""
-    albums = [l for k, l, _ in items if k == "albums"]
-    drop = set()
-    for g in groups(albums):
-        keep = keeper(g, is_fav, plays)
-        drop.update(l for l in g if l != keep)
-    return [it for it in items if not (it[0] == "albums" and it[1] in drop)]

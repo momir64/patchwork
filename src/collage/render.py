@@ -1,5 +1,6 @@
 """Turns a Layout + image files into the final collage image."""
 import colorsys
+import io
 import math
 import os
 import random
@@ -48,7 +49,6 @@ class Options:
     gap: int = 0
     margin: int = 0
     row_height: int = 300          # target (justified)
-    auto_balance: bool = True
     equal_rows: bool = True
     columns: int = 0               # grid, 0 = auto
     aspect: float = 0.0            # wanted overall width/height (0 = free); e.g. 2/3 portrait, 1 square
@@ -125,10 +125,15 @@ def color_key(path, by, mode="average"):
     return (1, lum) if s < 0.15 else (0, h)
 
 
-def order_items(labels, order, seed, path_of=None, mode="average", reverse=False):
+def order_items(labels, order, seed, path_of=None, mode="average", reverse=False, check=None):
+    """check: called now and then while working; it may raise to stop early (a cancelled preview)."""
     items = sorted(labels, key=lambda s: s.casefold())
     if order in ("hue", "bright"):
-        items.sort(key=lambda l: color_key(path_of[l], order, mode))
+        def key(l):
+            if check:
+                check()
+            return color_key(path_of[l], order, mode)
+        items.sort(key=key)
         if reverse:
             items.reverse()
     elif order == "za":
@@ -138,12 +143,16 @@ def order_items(labels, order, seed, path_of=None, mode="average", reverse=False
     return items
 
 
-def make_layout(paths, o: Options) -> Layout:
-    ratios = [ratio_of(p) for p in paths]
+def make_layout(paths, o: Options, check=None) -> Layout:
+    ratios = []
+    for p in paths:
+        if check:
+            check()
+        ratios.append(ratio_of(p))
     if o.mode == "grid":
         return grid(ratios, o.width, o.gap, o.margin, o.columns, aspect=o.aspect, keep=o.fit == "keep")
-    return justified(ratios, o.width, o.gap, o.margin, o.row_height, o.auto_balance, o.equal_rows and o.fit != "keep", o.aspect,
-                     keep=o.fit == "keep")
+    return justified(ratios, o.width, o.gap, o.margin, o.row_height, True, o.equal_rows and o.fit != "keep", o.aspect,
+                     keep=o.fit == "keep", check=check)
 
 
 def arrange(paths, layout: Layout, direction: str):
@@ -186,12 +195,15 @@ def render(paths, layout: Layout, bg=(0, 0, 0), progress=None) -> Image.Image:
     canvas = Image.new("RGB", (layout.width, layout.height), bg)
     total = len(layout.cells)
     keep = layout.fit == "keep"
-    with ThreadPoolExecutor(min(8, os.cpu_count() or 4)) as ex:
+    ex = ThreadPoolExecutor(min(8, os.cpu_count() or 4))
+    try:
         futs = ex.map(lambda c: (c, *_fitted(paths[c.index], c.w, c.h, keep)), layout.cells)
         for n, (c, img, off) in enumerate(futs, 1):
             canvas.paste(img, (c.x + off[0], c.y + off[1]))
             if progress:
-                progress(n, total)
+                progress(n, total)             # may raise to stop early (a cancelled preview): the queued images are dropped
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return canvas
 
 
@@ -205,6 +217,16 @@ def render_region(paths, layout: Layout, box, bg=(0, 0, 0)) -> Image.Image:
         for c, img, off in ex.map(lambda c: (c, *_fitted(paths[c.index], c.w, c.h, keep)), cells):
             canvas.paste(img, (c.x + off[0] - x, c.y + off[1] - y))
     return canvas
+
+
+def estimate_size(preview: Image.Image, full_w: int, full_h: int, o: Options) -> int:
+    """Rough size in bytes of the saved file: the preview is encoded the same way and its bytes per pixel scaled to the full size."""
+    buf = io.BytesIO()
+    if o.fmt == "PNG":
+        preview.save(buf, "PNG", optimize=False)
+    else:
+        preview.save(buf, "JPEG", quality=o.quality, subsampling=0)
+    return int(buf.tell() / max(1, preview.width * preview.height) * full_w * full_h)
 
 
 def save(img: Image.Image, name: str, o: Options):
