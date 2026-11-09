@@ -20,7 +20,7 @@ def build_parser():
     l.add_argument("kind", choices=KINDS)
     l.add_argument("--favs", action="store_true")
     c = sub.add_parser("collage", help="build a collage")
-    c.add_argument("kind", choices=["shows", "movies", "albums", "videos"], help="'videos' = shows + movies")
+    c.add_argument("kind", choices=["shows", "movies", "albums", "images", "videos"], help="'videos' = shows + movies")
     c.add_argument("--favs", action="store_true", help="only favorites")
     c.add_argument("--width", type=int, default=4000)
     c.add_argument("--row-height", type=int, default=300)
@@ -105,7 +105,7 @@ def run(argv):
                                                        not a.no_posters, a.metadata)
     elif a.cmd == "spotify-login":
         from .sources import spotify_user
-        print("Opening Spotify in the browser. Redirect address of your app:", spotify_user.REDIRECT_URI)
+        print("Opening Spotify in the browser. Redirect address of your app:", spotify_user.redirect(Config()))
         print("Signed in as", spotify_user.sign_in(Config()))
     elif a.cmd == "import-legacy":
         from .importer import import_legacy

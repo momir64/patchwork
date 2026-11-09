@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout
                                QVBoxLayout, QWidget)
 
 from ..core import covers, editions
-from ..core.library import title_from_label
+from ..core.library import IMG_EXT, title_from_label
 from ..core.names import fold, norm_key, safe_filename, sort_key
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
@@ -23,7 +23,7 @@ ROLE_SEL = ROLE_KIND + 3
 ROLE_PIX = ROLE_KIND + 4
 ROLE_SUB = ROLE_KIND + 5
 ALL = "__all__"
-KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc"}
+KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc", "images": "image"}
 
 
 def display_title(lib, label):
@@ -41,6 +41,15 @@ def display_sub(lib, label):
 def tooltip(lib, label):
     m = lib.meta.get(label)
     lines = [f"<b>{display_title(lib, label)}</b>"]
+    if lib.kind == "images":                                  # your own images only have a name and a size
+        p = lib.poster(label)
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                lines.append(f"<span style='color:{theme.MUTED}'>Size:</span> {im.width} × {im.height}")
+        except Exception:
+            pass
+        return "<br>".join(lines)
     for key, name in (("year", "Year"), ("genres", "Genres"), ("countries", "Countries"), ("languages", "Languages"),
                       ("creators", {"albums": "Artist", "movies": "Director"}.get(lib.kind, "Creators")), ("studio", "Studio")):
         v = lib.meta.values(label, "genre") if (key == "genres" and lib.kind == "albums") else m.get(key)
@@ -143,6 +152,9 @@ SORTS = {
                ("Added (newest first)", "Added (oldest first)", "added"),
                ("Color (rainbow)", "Color (wobniar)", "hue"),
                ("Color (dark to light)", "Color (light to dark)", "bright"), ("Favorites first", "Favorites last", "favs")),
+    "images": (("Name (A–Z)", "Name (Z–A)", "az"), ("Added (newest first)", "Added (oldest first)", "added"),
+               ("Color (rainbow)", "Color (wobniar)", "hue"),
+               ("Color (dark to light)", "Color (light to dark)", "bright"), ("Favorites first", "Favorites last", "favs")),
 }
 
 
@@ -152,8 +164,9 @@ HIDDEN_SORT = ("Hidden (latest first)", "Hidden (earliest first)", "hidden")    
 class CardDelegate(QStyledItemDelegate):
     PAD, GAP, TEXT_H = 8, 8, 54
 
-    def __init__(self, square: bool):
+    def __init__(self, square: bool, fit: bool = False):
         super().__init__()
+        self.fit = fit                                             # fit = show the whole image inside the cell instead of filling it
         self.square, self.width, self.base = square, 170, 170     # width = actual card width, base = chosen size
         self.hover_row = -1                                        # the card under the mouse (set by the view)
         self._title_font = QFont()
@@ -222,7 +235,7 @@ class CardDelegate(QStyledItemDelegate):
         kind = index.data(ROLE_KIND)
         if pm is not None and not pm.isNull():
             p.setClipPath(shape)
-            mode = Qt.AspectRatioMode.KeepAspectRatio if (kind == "albums" and not self.square) else Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            mode = Qt.AspectRatioMode.KeepAspectRatio if self.fit else Qt.AspectRatioMode.KeepAspectRatioByExpanding
             s = self.scaled(pm, pr.size(), mode)
             p.drawPixmap(pr.left() + (pr.width() - s.width()) // 2, pr.top() + (pr.height() - s.height()) // 2, s)
             p.setClipping(False)
@@ -391,7 +404,8 @@ class MediaPage(QWidget):
         self._sel_now, self._sel_history, self._sel_redo = frozenset(), [], []        # for Ctrl+Z
         self.model = ItemModel(state)
         self.model.sel = self.sel
-        self.delegate = CardDelegate(square=(self.cat == "albums"))
+        self.images = self.cat == "images"              # your own images: no metadata, sources or duplicates, so those controls go
+        self.delegate = CardDelegate(square=self.cat in ("albums", "images"), fit=self.images)
         self.delegate.base = state.pref("zoom", 170)
         self.view = CardView(self.delegate)
         self.view.setModel(self.model)
@@ -405,7 +419,7 @@ class MediaPage(QWidget):
         self.icon_lbl.setPixmap(icons.pixmap(KIND_ICON[self.cat], theme.ACCENT, 24) if kind else icons.pixmap("folder", state.group_color(self.cat, group[1]), 24))
         self.title = label(self.lib.title if kind else group[1], "h1")
         self.count = label("", "chip")
-        self.search = SearchBox("Search title, genre, country, creator...")
+        self.search = SearchBox("Search images..." if self.images else "Search title, genre, country, creator...")
         self.search.setMinimumWidth(330)
         self.search.setMaximumWidth(460)
         self._search_timer = QTimer(self)                         # wait for a pause in typing instead of filtering on every key
@@ -422,11 +436,15 @@ class MediaPage(QWidget):
         self.zoom_box = self._zoom_box()
         head.addWidget(self.zoom_box)
         head.addWidget(self.search, 1)
-        if kind:
+        if kind and not self.images:
             self.dup_btn = button("Resolve duplicates", "layers", tip="Find items that exist more than once (editions, with / without a year) and merge them")
             self.dup_btn.clicked.connect(self.merge_duplicates)
             head.addWidget(self.dup_btn)
-        if kind:
+        if kind and self.images:
+            add = button("Add images", "plus", tip="Add image files (you can also drop files or folders onto this page)")
+            add.clicked.connect(self.add_images_dialog)
+            head.addWidget(add)
+        elif kind:
             add = button("Add", "plus", tip="Add an item by hand")
             add.clicked.connect(self.add_item)
             head.addWidget(add)
@@ -442,7 +460,10 @@ class MediaPage(QWidget):
                 head.addWidget(b)
 
         # ------------------------------------------------ toolbar (wraps when narrow)
-        self.mode = Segmented([("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden"), ("Duplicates", "dups")], "all")
+        tabs = [("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden"), ("Duplicates", "dups")]
+        if self.images:                                           # every image has its file, and nothing makes duplicates of them
+            tabs = [t for t in tabs if t[1] not in ("nopic", "dups")]
+        self.mode = Segmented(tabs, "all")
         self.mode.set_value(getattr(state, "tab", "all"), emit=False)     # the tab is shared by every page
         self.mode.changed.connect(lambda v: setattr(state, "tab", v))
         self.mode.changed.connect(self.refresh)
@@ -451,7 +472,7 @@ class MediaPage(QWidget):
         flow.addWidget(self.mode)
         self.sort_cb = QComboBox()
         self.sort_cb.setMinimumWidth(150)
-        self.sort_names = tuple(sorted(SORTS["albums" if self.cat == "albums" else "video"], key=self._sort_rank))   # alphabetical
+        self.sort_names = tuple(sorted(SORTS[self.cat if self.cat in ("albums", "images") else "video"], key=self._sort_rank))   # alphabetical
         for text, _, key in self.sort_names:
             self.sort_cb.addItem(text, key)
         self.sort_cb.setCurrentIndex(self.sort_cb.findData("az"))                   # Title is the default
@@ -470,7 +491,7 @@ class MediaPage(QWidget):
         self._label_sorts(state.reverse_sort)
         flow.addWidget(self.reverse_btn)
         self.facets = {}
-        for facet in ("genre", "country", "language"):
+        for facet in (() if self.images else ("genre", "country", "language")):
             cb = SearchCombo()
             cb.setMinimumWidth(140)
             cb.currentIndexChanged.connect(self.refresh)
@@ -486,6 +507,7 @@ class MediaPage(QWidget):
         self.empty = label("", "muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stack = QStackedLayout()
+        self.setAcceptDrops(self.images)                  # image files can be dropped onto the page
         self.view.setParent(self)                         # parentless widgets that get shown flash up as tiny windows at start
         self.empty.setParent(self)
         self.stack.addWidget(self.view)
@@ -497,6 +519,10 @@ class MediaPage(QWidget):
         self.btn_fav = button("Favorite", "star", tip="Toggle favorite for the selected items")
         self.btn_group = button("Add to group", "folder", tip="Add the selected items to a group")
         self.btn_unlink = button("Remove from group", "minus-circle", tip="Remove the selected items from this group")
+        self.btn_hide = button("Hide", "eye-off", tip="Hide the selected items (or show them again)")
+        self.btn_remove = button("Remove", "trash", "danger", "Remove the selected items")
+        self.btn_hide.clicked.connect(self.toggle_hide_selected)
+        self.btn_remove.clicked.connect(lambda: self.remove_many([l for _, l in self.selected()]))
         self.btn_fav.clicked.connect(self.toggle_fav_selected)
         self.btn_group.clicked.connect(self.group_menu)
         self.btn_unlink.clicked.connect(self.remove_from_group)
@@ -510,6 +536,12 @@ class MediaPage(QWidget):
         redo = QShortcut(QKeySequence.StandardKey.Redo, self)          # Ctrl+Y / Ctrl+Shift+Z
         redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         redo.activated.connect(lambda: self.undo_selection(redo=True))
+        hide = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)         # Delete hides the selected items, Shift+Delete removes them (asks first)
+        hide.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        hide.activated.connect(lambda: self.set_hidden([l for _, l in self.selected()], True) if self.sel else None)
+        rm = QShortcut(QKeySequence("Shift+Delete"), self)
+        rm.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        rm.activated.connect(lambda: self.remove_many([l for _, l in self.selected()]) if self.sel else None)
         for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):      # item size, like a browser's zoom
             zs = QShortcut(QKeySequence(keys), self)
             zs.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -530,9 +562,18 @@ class MediaPage(QWidget):
         self.cancel_btn.hide()
         ah.addWidget(self.cancel_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         ah.addWidget(self.status, 1, Qt.AlignmentFlag.AlignVCenter)                    # latest message (sync, saved, favorites...) on the left
-        ah.addWidget(self.info)
+        self.clear_btn = Btn("", "x", "ghost", "Deselect all", size=14, height=24, pad=0)      # next to the selected count
+        self.clear_btn.setFixedSize(24, 24)
+        self.clear_btn.clicked.connect(self.clear_selection)
+        self.clear_btn.hide()
+        count = QHBoxLayout()                                    # the count with its X right beside it
+        count.setContentsMargins(0, 0, 0, 0)
+        count.setSpacing(0)
+        count.addWidget(self.info)
+        count.addWidget(self.clear_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        ah.addLayout(count)
         ah.addSpacing(8)
-        for b in (self.btn_all, self.btn_fav, self.btn_group, self.btn_unlink):
+        for b in (self.btn_all, self.btn_fav, self.btn_group, self.btn_unlink, self.btn_hide, self.btn_remove):
             ah.addWidget(b)
         self.compact = False
 
@@ -568,7 +609,7 @@ class MediaPage(QWidget):
         zoom.setRange(60, 260)
         zoom.setValue(self.delegate.base)
         zoom.setFixedSize(100, 34)
-        zoom.setToolTip("Poster size")
+        zoom.setToolTip("Image size" if self.images else "Poster size")
         zoom.valueChanged.connect(self.set_zoom)
         self.zoom = zoom
         self.state.zoom_changed.connect(self._zoom_from_other)
@@ -785,6 +826,9 @@ class MediaPage(QWidget):
                 self.empty.setText("No hidden items.\nRight-click an item and choose Hide to tuck it away.")
             elif self.mode.value == "dups" and total == 0:
                 self.empty.setText("No hidden duplicates.")
+            elif total == 0 and self.images:
+                self.empty.setText("No images yet.\nUse Add images, or drop image files here." if self.kind else
+                                   "No images in this group yet.\nSelect images in Images and choose Add to group, or drop files here.")
             elif total == 0:
                 self.empty.setText("No items yet." + ("\nPress Sync to import from your sources, or use Add." if self.kind else
                                                        f"\nSelect titles in {self.lib.title} and choose Add to group."))
@@ -842,17 +886,21 @@ class MediaPage(QWidget):
             self._sel_now = now
         n, shown = len(self.sel), len(self.model.items)
         self.info.setText(f"{n} selected" if n else f"{shown} shown")
-        self.info.setToolTip("Click posters to select (shift-click for a range), click the star to favorite")
-        for b in (self.btn_fav, self.btn_group, self.btn_unlink):
+        self.info.setToolTip(f"Click {'images' if self.images else 'posters'} to select (shift-click for a range), click the star to favorite")
+        for b in (self.btn_fav, self.btn_group, self.btn_unlink, self.btn_hide, self.btn_remove):
             b.setEnabled(n > 0)
         self.btn_all.setEnabled(shown > 0)
         sel = self.selected()
         self._fav_state = bool(sel) and all(self.lib.is_fav(l) for _, l in sel)
         self._all_selected = shown > 0 and set(self.model.items) <= self.sel
+        self.clear_btn.setVisible(n > 0 and not self._all_selected)      # "Unselect all" already does it then
         self._label(self.btn_fav, "Unfavorite" if self._fav_state else "Favorite")
         self._label(self.btn_all, "Unselect all" if self._all_selected else "Select all", "x" if self._all_selected else "check")
         self._label(self.btn_group, "Add to group")
         self._label(self.btn_unlink, "Remove from group")
+        all_hidden = bool(sel) and all(self.lib.is_hidden(l) for _, l in sel)
+        self._label(self.btn_hide, "Unhide" if all_hidden else "Hide", "eye" if all_hidden else "eye-off")
+        self._label(self.btn_remove, "Remove")
 
     def set_syncing(self, busy):
         self.cancel_btn.setVisible(busy)
@@ -938,6 +986,11 @@ class MediaPage(QWidget):
         self.log.emit(f"{len(sel)} item(s) {'added to' if value else 'removed from'} favorites")
         self.refresh()
         self.data_changed.emit()
+
+    def toggle_hide_selected(self):
+        labels = [l for _, l in self.selected()]
+        if labels:
+            self.set_hidden(labels, not all(self.lib.is_hidden(l) for l in labels))
 
     # ------------------------------------------------------------ groups (each belongs to this page's category)
     def _ask_group(self, text=""):
@@ -1030,7 +1083,7 @@ class MediaPage(QWidget):
         menu.addAction(icons.icon("eye" if hid else "eye-off", theme.MUTED, 16),
                        ("Unhide" if hid else "Hide") + (f" ({len(items)})" if many else ""),
                        lambda: self.set_hidden(labels, not hid))
-        if many:
+        if many and not self.images:
             menu.addAction(icons.icon("layers", theme.MUTED, 16), f"Mark {len(items)} as duplicates", lambda: self.mark_duplicates(labels))
         sub = menu.addMenu(icons.icon("folder", theme.MUTED, 16), "Add to group")
         for name in self.state.groups.names(self.cat):
@@ -1041,10 +1094,13 @@ class MediaPage(QWidget):
                            lambda: (self.state.groups.remove_items(self.cat, self.group[1], labels), self.sel.clear(), self.groups_changed.emit(), self.reload()))
         menu.addSeparator()
         if not many:
-            menu.addAction(icons.icon("image", theme.MUTED, 16), "Replace poster...", lambda: self.replace_poster(labels[0]))
+            menu.addAction(icons.icon("image", theme.MUTED, 16), "Replace image..." if self.images else "Replace poster...",
+                           lambda: self.replace_poster(labels[0]))
             menu.addAction(icons.icon("edit", theme.MUTED, 16), "Rename...", lambda: self.rename(labels[0]))
-            menu.addAction(icons.icon("tag", theme.MUTED, 16), "Edit metadata...", lambda: self.edit_metadata(labels[0]))
-        menu.addAction(icons.icon("trash", theme.DANGER, 16), f"Remove {len(items)} from list" if many else "Remove from list",
+            if not self.images:
+                menu.addAction(icons.icon("tag", theme.MUTED, 16), "Edit metadata...", lambda: self.edit_metadata(labels[0]))
+        gone = "Remove" if self.images else "Remove from list"
+        menu.addAction(icons.icon("trash", theme.DANGER, 16), f"{gone.replace('Remove', 'Remove ' + str(len(items)))}" if many else gone,
                        lambda: self.remove_many(labels))
         menu.exec(self.view.viewport().mapToGlobal(pos))
 
@@ -1079,7 +1135,9 @@ class MediaPage(QWidget):
     def remove_many(self, labels):
         if len(labels) == 1:
             return self.remove(labels[0])
-        if not confirm(self, "Remove items", f"Remove {len(labels)} items?\nThis deletes them and their posters. Hide them instead to keep them out of sight.", "Remove", danger=True):
+        what = "images" if self.images else "items"
+        gone = "from Patchwork. Your original files are not touched." if self.images else "and their posters."
+        if not confirm(self, f"Remove {what}", f"Remove {len(labels)} {what}?\nThis deletes them {gone} Hide them instead to keep them out of sight.", "Remove", danger=True):
             return
         for l in labels:
             self.lib.forget(l)
@@ -1101,7 +1159,7 @@ class MediaPage(QWidget):
             self.groups_changed.emit()
 
     def replace_poster(self, label_):
-        path, _ = QFileDialog.getOpenFileName(self, "Choose poster", "", "Images (*.jpg *.jpeg *.png *.webp)")
+        path, _ = QFileDialog.getOpenFileName(self, "Choose image" if self.images else "Choose poster", "", "Images (*.jpg *.jpeg *.png *.webp)")
         if path:
             if self.lib.poster(label_):
                 self.state.thumbs.invalidate(self.lib.poster(label_))
@@ -1128,7 +1186,8 @@ class MediaPage(QWidget):
             self.data_changed.emit()
 
     def remove(self, label_):
-        if confirm(self, "Remove", f"Remove '{display_title(self.lib, label_)}'?\nThis deletes it and its poster. Hide it instead to keep it out of sight.", "Remove", danger=True):
+        gone = "from Patchwork. Your original file is not touched." if self.images else "and its poster."
+        if confirm(self, "Remove", f"Remove '{display_title(self.lib, label_)}'?\nThis deletes it {gone} Hide it instead to keep it out of sight.", "Remove", danger=True):
             self.lib.forget(label_)
             self.lib.save()
             in_groups = bool(self.state.groups.groups_of(self.cat, label_))
@@ -1137,6 +1196,56 @@ class MediaPage(QWidget):
             self.data_changed.emit()
             if in_groups:
                 self.groups_changed.emit()
+
+    # ------------------------------------------------------------ your own images (kind "images")
+    def add_images_dialog(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add images", "", "Images (*.jpg *.jpeg *.png *.webp)")
+        if paths:
+            self.add_images(paths)
+
+    def add_images(self, paths):
+        """Copy image files (or every image inside the folders given) into the library; on a group page they join the group."""
+        files = []
+        for p in map(Path, paths):
+            if p.is_dir():
+                files += sorted(f for f in p.rglob("*") if f.suffix.lower() in IMG_EXT)
+            elif p.suffix.lower() in IMG_EXT:
+                files.append(p)
+        added, skipped = [], 0
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            from PIL import Image
+            for f in files:
+                try:
+                    with Image.open(f) as im:
+                        im.verify()                                   # a broken file would only show as an empty card
+                except Exception:
+                    skipped += 1
+                    continue
+                label = self.lib.add_file(f)
+                self.state.thumbs.invalidate(self.lib.poster(label))
+                added.append(label)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if added:
+            self.lib.save()
+            if self.group:
+                self.state.add_group(self.cat, self.group[1], added)
+            self.log.emit(f"Added {len(added)} image(s)")
+            self.data_changed.emit()
+            if self.group:
+                self.groups_changed.emit()
+        if skipped or not files:
+            notify(self, "Add images", f"{skipped} file(s) could not be read as images." if skipped else "No image files found (jpg, png or webp).")
+
+    def dragEnterEvent(self, e):
+        if self.images and e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        if self.images and e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self.add_images([u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()])
 
     def add_item(self):
         title = ask_text(self, f"Add to {self.lib.title}", f"Title to add to {self.lib.title} (a poster is fetched on the next sync):", "", "Add")

@@ -377,23 +377,33 @@ class Modal(QDialog):
                       max(screen.top(), min(c.y() - self.height() // 2, screen.bottom() - self.height())))
 
 
-def _fit(text, minimum=420):
-    """Dialog content width that shows `text` (possibly several lines) without wrapping."""
+def _fit(text, minimum=420, maximum=None):
+    """Dialog content width that shows `text` (possibly several lines) without wrapping, up to `maximum` (longer lines wrap)."""
     from PySide6.QtGui import QFontMetrics
     fm = QFontMetrics(QGuiApplication.font())
-    return max(minimum, max(fm.horizontalAdvance(line) for line in text.splitlines() or [""]) + 48)
+    width = max(minimum, max(fm.horizontalAdvance(line) for line in text.splitlines() or [""]) + 48)
+    return min(width, maximum) if maximum else width
+
+
+def _by_sentence(text):
+    """One sentence per line (the first line, which may hold a title with dots in it, is left alone)."""
+    import re
+    first, *rest = text.split(chr(10))
+    return chr(10).join([first] + [s for line in rest for s in re.split(r"(?<=[.!?])\s+", line)])
 
 
 def confirm(parent, title, text, ok="OK", danger=False) -> bool:
-    d = Modal(parent, title, _fit(text), resizable=False)
-    d.body.addWidget(label(text, None))
+    text = _by_sentence(text)
+    d = Modal(parent, title, _fit(text, 380, 440), resizable=False)       # long messages wrap instead of widening the dialog
+    d.body.addWidget(label(text, None, wrap=True))
     d.footer(ok, None, danger=danger)
     return bool(d.exec())
 
 
 def notify(parent, title, text):
-    d = Modal(parent, title, _fit(text), resizable=False)
-    d.body.addWidget(label(text, None))
+    text = _by_sentence(text)
+    d = Modal(parent, title, _fit(text, 380, 440), resizable=False)
+    d.body.addWidget(label(text, None, wrap=True))
     d.footer("OK", None, cancel_text=None)
     d.exec()
 

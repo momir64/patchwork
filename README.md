@@ -16,6 +16,8 @@ It is written in Python with PySide6 (Qt) and also ships with a command-line int
 - **Syncing.** Sonarr and Radarr for what you own, Trakt for what you have watched and rated, Last.fm and Spotify (your
   account, or a data export) for what you listen to. Posters and details come from those sources, with TMDB,
   MusicBrainz, Deezer and iTunes as fallbacks.
+- **Your own images.** An *Images* library for any pictures you drop in, with favorites, groups, hiding and color
+  sorting, and its own entry in the collage media list.
 - **Browsing.** Shows, movies and albums each get their own library. Search, filter by genre, country, language or
   group, and sort by title, year, rating, plays, date added or cover color.
 - **Organizing.** Favorites, custom groups (drag to reorder), renaming, hiding, a metadata editor, and a duplicate
@@ -83,6 +85,8 @@ sync options, where you can pick the sources, steps and media types.
 | [![Collage page with albums](docs/screenshots/collage-builder-albums.webp)](docs/screenshots/collage-builder-albums.png) | [![Collage page with shows](docs/screenshots/collage-builder-shows.webp)](docs/screenshots/collage-builder-shows.png) |
 
 Ctrl + scroll or Ctrl +/- changes the poster size, Ctrl+A selects everything shown and Ctrl+Z undoes a selection change.
+Delete hides the selected items and Shift+Delete removes them. To use your own pictures, open *Images* and press *Add
+images* or drop files onto the page.
 
 Some defaults to be aware of: syncing only adds items and never removes them; Radarr only adds movies that are
 unmonitored (configurable in Settings); and Trakt never changes your favorites unless you enable it.
@@ -121,8 +125,8 @@ python main.py --help
 
 ## Data
 
-Everything lives in `data/` next to the app, as plain files you can read and back up. `shows/` and `movies/` have the
-same layout as `albums/`.
+Everything lives in `data/` next to the app, as plain files you can read and back up. `shows/`, `movies/` and `images/`
+have the same layout as `albums/`.
 
 ```
 data/

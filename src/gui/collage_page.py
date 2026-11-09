@@ -14,11 +14,12 @@ from .common import Job, pil_to_qimage
 from .widgets import Btn, ProgressLine, UnitSpin, Chips, Segmented, button, divider, form_row, label, section_header, stacked_row
 
 ALL_MEDIA = "All media"
-SOURCES = {ALL_MEDIA: ["shows", "movies", "albums"], "Albums": ["albums"], "Movies": ["movies"], "Shows": ["shows"]}   # Albums is the default
+SOURCES = {ALL_MEDIA: ["shows", "movies", "albums"], "Albums": ["albums"], "Movies": ["movies"], "Shows": ["shows"],
+           "Images": ["images"]}   # Albums is the default
 DEFAULT_SOURCE = "Albums"
 SCOPES = (("Favorites", "favs"), ("Group", "group"), ("Selection", "picks"))      # after the default "All items", A-Z
 COLOR_FROM = (("Average", "average"), ("Dominant", "dominant"), ("Accent", "accent"))
-KIND_TITLES = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
+KIND_TITLES = {"shows": "Shows", "movies": "Movies", "albums": "Albums", "images": "Images"}
 RATIOS = (("Free", ""), ("16:9", "16:9"), ("2:3", "2:3"), ("3:4", "3:4"), ("4:5", "4:5"), ("1:1", "1:1"))   # Free, then farthest from square to square
 PREVIEW_WIDTH = 1500
 

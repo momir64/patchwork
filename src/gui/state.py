@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Signal
 from ..core.config import DATA_DIR, Config
 from ..core.groups import Groups
 from ..core import editions
-from ..core.library import KINDS, Library, migrate_names
+from ..core.library import LIBRARIES, Library, migrate_names
 from .common import ThumbLoader
 
 PREFS_PATH = DATA_DIR / "ui.json"
@@ -23,7 +23,7 @@ class AppState(QObject):
     def __init__(self):
         super().__init__()
         self.cfg = Config()
-        self.libs = {k: Library(k) for k in KINDS}
+        self.libs = {k: Library(k) for k in LIBRARIES}
         migrate_names(self.libs)
         for lib in self.libs.values():
             editions.sweep(lib)

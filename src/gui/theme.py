@@ -44,7 +44,7 @@ QPushButton:focus {{ border-color: {ACCENT}; }}
 QPushButton#primary {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: white; font-weight: 600; }}
 QPushButton#primary:hover {{ background: {ACCENT_H}; border-color: {ACCENT_H}; }}
 QPushButton#primary:disabled {{ background: #35305c; border-color: #35305c; color: #8a85ad; }}
-QPushButton#ghost, QToolButton#ghost {{ background: transparent; border: 1px solid transparent; color: {MUTED}; }}
+QPushButton#ghost, QToolButton#ghost {{ background: transparent; border: 1px solid transparent; color: {MUTED}; min-height: 0; }}
 QPushButton#ghost:hover, QToolButton#ghost:hover {{ background: {SURFACE2}; color: {TEXT}; }}
 QPushButton#ghost:disabled {{ background: transparent; border-color: transparent; }}
 QPushButton#danger:hover {{ background: #3a1f29; border-color: {DANGER}; }}

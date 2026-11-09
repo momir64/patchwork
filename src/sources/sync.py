@@ -50,6 +50,7 @@ class Sync:
         """Tell the UI which step is running (the percentage then belongs to it)."""
         self.check()
         self.stage_cb(text)
+        self.progress(0, 0)                      # until the step reports how far it is, the bar runs instead of staying at the last 100%
 
     def label(self, title):
         return self.aliases.get(norm_key(title), title)
@@ -137,7 +138,7 @@ class Sync:
         cfg = self.cfg
         liked, playlists, top = cfg.flag("SPOTIFY_LIKED"), cfg.flag("SPOTIFY_PLAYLISTS"), cfg.flag("SPOTIFY_TOP")
         saved, lk, pl, tp = spotify_user.library(cfg, liked, playlists, top, self.log, self.progress)
-        return spotify.entries_from(saved, lk, pl, liked, playlists, cfg.integer("SPOTIFY_MIN_SONGS", 1), top=tp)
+        return spotify.entries_from(saved, lk, pl, liked, playlists, cfg.integer("SPOTIFY_MIN_SONGS", 3), top=tp)
 
     def _trakt_entries(self, trakt, kind):
         entries, self._ratings = trakt.collect(kind, self.progress)
@@ -156,6 +157,7 @@ class Sync:
     # ------------------------------------------------------------ posters
     def _pool(self, jobs, work, workers=8):
         done = [0]
+        self.progress(0, 0)                              # running bar until the first result is in
 
         def wrapped(job):
             self.check()
@@ -270,26 +272,31 @@ class Sync:
         lib = self.libs["albums"]
         self.log(f"Looking up the release year of {len(labels)} albums ({source})...")
 
+        told = []
+
         def work(l):
             m = lib.meta.get(l)
             try:
                 return lookup(m, m.get("title") or l.split(" - ", 1)[-1])
             except Exception as e:
-                if not self._year_trouble:
+                if not told:                                 # the reason once, not once per album
+                    told.append(1)
                     self.log(f"  [{source}] {e}")
                 return -1                                    # network trouble: try again next sync
 
-        missed = []
+        missed, asked = [], 0
         for n, (l, year) in enumerate(self._pool(labels, work, workers), 1):
-            if year == -1:
+            if year == -1:                                   # not looked up (rate limit / network trouble): not counted, not reported
                 self._year_trouble.add(l)
                 missed.append(l)
-            elif year:
+                continue
+            asked += 1
+            if year:
                 lib.meta.update(l, {"year": year})
                 found[source] = found.get(source, 0) + 1
             else:
                 missed.append(l)
-            if n % 50 == 0:
+            if asked % 50 == 0:
                 lib.meta.save()
                 self.log(f"Release years ({source}): {n}/{len(labels)} albums done")
         return missed
@@ -299,7 +306,7 @@ class Sync:
         lib, by_artist = self.libs["albums"], {}
         for l in labels:
             by_artist.setdefault(norm_key(lib.meta.get(l)["creators"][0]), []).append(l)
-        self.log(f"Looking up release years of {len(by_artist)} artists (MusicBrainz, about 1 per second)...")
+        self.log(f"Looking up release years of {len(by_artist)} artists (MusicBrainz)...")
 
         def work(group):
             first = lib.meta.get(group[0])

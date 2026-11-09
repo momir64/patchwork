@@ -15,6 +15,7 @@ _lock, _last = threading.Lock(), [0.0]
 MIN_GAP = 0.3                       # seconds between requests: ~3/s, well under Last.fm's ~5/s limit for API keys
 RETRY_CODES = {8, 11, 16, 29}       # operation failed / service offline / temporarily unavailable / rate limit exceeded
 HEADERS = {"User-Agent": "Patchwork/1.0 (personal media collage tool)"}
+notice = lambda text: None          # where waits are reported (fetch_albums points it at the sync log)
 PERIOD_DAYS = {"7day": 7, "1month": 30, "3month": 91, "6month": 182, "12month": 365}
 
 
@@ -32,14 +33,17 @@ def _call(cfg, method, **params):
         except Exception:
             if attempt == 5:
                 raise
+            notice(f"[Last.fm] connection problem, trying again in {2 * 2 ** attempt} s...")
             time.sleep(2 * 2 ** attempt)
             continue
         if resp.status_code in (429, 500, 502, 503, 504):
+            notice(f"[Last.fm] busy ({resp.status_code}), waiting {min(60, 3 * 2 ** attempt)} s...")
             time.sleep(min(60, 3 * 2 ** attempt))
             continue
         r = resp.json()
         if "error" in r:
             if r["error"] in RETRY_CODES and attempt < 5:
+                notice(f"[Last.fm] {r.get('message')}, waiting {min(60, 3 * 2 ** attempt)} s...")
                 time.sleep(min(60, 3 * 2 ** attempt))
                 continue
             raise RuntimeError(f"Last.fm: {r.get('message')}")
@@ -52,7 +56,13 @@ def check(cfg):
 
 
 def fetch_albums(cfg, log=print, progress=None) -> list:
-    return fetch_recent_albums(cfg, log, progress) if cfg.get("LASTFM_SOURCE") == "recent" else fetch_top_albums(cfg, progress)
+    global notice
+    notice = log
+    if cfg.get("LASTFM_SOURCE") == "recent":
+        log("[Last.fm] reading your listening history...")
+        return fetch_recent_albums(cfg, log, progress)
+    log("[Last.fm] reading your top albums...")
+    return fetch_top_albums(cfg, progress, log)
 
 
 def fetch_recent_albums(cfg, log=print, progress=None) -> list:
@@ -90,7 +100,7 @@ def fetch_recent_albums(cfg, log=print, progress=None) -> list:
     return out
 
 
-def fetch_top_albums(cfg, progress=None) -> list:
+def fetch_top_albums(cfg, progress=None, log=print) -> list:
     limit = cfg.integer("LASTFM_LIMIT", 1024) or 10 ** 9      # 0 = every album
     albums, page = [], 1
     while len(albums) < limit:
@@ -100,6 +110,8 @@ def fetch_top_albums(cfg, progress=None) -> list:
         pages = min(int(data["@attr"]["totalPages"] or 1), -(-limit // 50))      # pages that will really be needed
         if progress:
             progress(page, pages)
+        if page % 10 == 0 and page < pages:
+            log(f"[Last.fm] top albums page {page}/{pages}, {len(albums)} albums so far")
         if not data.get("album") or page >= pages:
             break
         page += 1

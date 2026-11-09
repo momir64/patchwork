@@ -491,12 +491,13 @@ class SettingsDialog(Modal):
     def spotify_login(self, v):
         v.addSpacing(14)
         v.addWidget(label("Sign in", "cardtitle"))
-        v.addWidget(label("Add this redirect address to your Spotify app (Settings -> Redirect URIs), then sign in. "
+        v.addWidget(label("Add this redirect address to your Spotify app (Settings -> Redirect URIs), then sign in. You can change it, e.g. to use another port. "
                           "Sync then reads your saved albums, liked songs, playlists and top songs directly.", "dim", wrap=True))
-        uri = QLineEdit(spotify_user.REDIRECT_URI)
-        uri.setReadOnly(True)
+        uri = QLineEdit(spotify_user.redirect(self.cfg))
+        uri.setPlaceholderText(spotify_user.REDIRECT_URI)
+        self.fields["SPOTIFY_REDIRECT_URI"] = uri                 # editable: change it when port 8765 is taken
         copy = button("Copy", "copy")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(spotify_user.REDIRECT_URI))
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(uri.text().strip() or spotify_user.REDIRECT_URI))
         urow = QHBoxLayout()
         urow.setSpacing(10)
         urow.addWidget(uri, 1)
@@ -532,7 +533,7 @@ class SettingsDialog(Modal):
         v.addLayout(boxes)
         spin = UnitSpin("songs", "song")
         spin.setRange(1, 50)
-        spin.setValue(self.cfg.integer("SPOTIFY_MIN_SONGS", 1))
+        spin.setValue(self.cfg.integer("SPOTIFY_MIN_SONGS", 3))
         spin.setFixedWidth(96)
         self.fields["SPOTIFY_MIN_SONGS"] = spin
         lbls = [label("Skip albums with fewer than", "dim"), label("in these lists", "dim")]

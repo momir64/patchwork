@@ -9,7 +9,8 @@ from .jsonstore import read_json, write_json
 from .meta import Meta
 from .names import norm_key, safe_filename, sort_key
 
-KINDS = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
+KINDS = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}       # the synced media types
+LIBRARIES = {**KINDS, "images": "Images"}                                  # plus your own images, which nothing syncs
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 
 
@@ -65,7 +66,7 @@ class Library:
     def __init__(self, kind: str):
         ensure_dirs()
         self.kind = kind
-        self.title = KINDS[kind]
+        self.title = LIBRARIES[kind]
         self.json_path = kind_dir(kind) / "library.json"
         self.poster_dir = kind_dir(kind) / "posters"
         self.load()
@@ -133,6 +134,17 @@ class Library:
         self._keys[norm_key(label)] = label
         self.meta.stamp_added(label)
         return True
+
+    def add_file(self, path: Path) -> str:
+        """Add an image file of your own (kind 'images'): the file name becomes its label, made unique when it is taken."""
+        base = path.stem.strip() or "image"
+        label, n = base, 2
+        while self.has(label):
+            label, n = f"{base} ({n})", n + 1
+        self.unforget(label)
+        self.add(label)
+        self.set_poster(label, path)
+        return label
 
     def remove(self, label: str):
         k = norm_key(label)

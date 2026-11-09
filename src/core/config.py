@@ -24,7 +24,7 @@ ENV_PATH = ROOT / ".env"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "output"
 ALIASES_PATH = DATA_DIR / "aliases.json"
-KIND_NAMES = ("shows", "movies", "albums")
+KIND_NAMES = ("shows", "movies", "albums", "images")
 
 
 def kind_dir(kind: str) -> Path:
@@ -52,10 +52,11 @@ KEYS = {
     "TMDB_API_KEY": ("", "Fallback posters + genres/countries/creators for shows & movies"),
     "SPOTIFY_CLIENT_ID": ("", "https://developer.spotify.com/dashboard -> your app's Client ID"),
     "SPOTIFY_CLIENT_SECRET": ("", "https://developer.spotify.com/dashboard -> your app's Client secret"),
+    "SPOTIFY_REDIRECT_URI": ("http://127.0.0.1:8765/callback", "Redirect address of your Spotify app for the sign-in (http, 127.0.0.1 or localhost, with a port; it must be listed in the app's Redirect URIs)"),
     "SPOTIFY_LIKED": ("false", "true = albums of your liked songs are imported when you sync from your Spotify account"),
     "SPOTIFY_PLAYLISTS": ("false", "true = albums of your playlists are imported when you sync from your Spotify account"),
     "SPOTIFY_TOP": ("true", "true = albums of your top songs (Spotify's own ranking of what you play most) are imported when you sync from your Spotify account"),
-    "SPOTIFY_MIN_SONGS": ("1", "Songs an album needs in top songs / liked songs / playlists to be imported by an account sync (saved albums always count). The file import has its own setting"),
+    "SPOTIFY_MIN_SONGS": ("3", "Songs an album needs in top songs / liked songs / playlists to be imported by an account sync (saved albums always count). The file import has its own setting"),
 }
 
 

@@ -12,7 +12,7 @@ from .widgets import Btn, ProgressLine, section_header
 
 FOLDER_COLORS = ["#ff5252", "#ff8c42", "#ffc933", "#7bd88f", "#40c9c6", "#5aa9ff", "#8b6cff", "#c77dff", "#ff6b9d"]     # rainbow order
 COLOR_NAMES = ["Red", "Orange", "Amber", "Green", "Teal", "Blue", "Violet", "Orchid", "Pink"]
-KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc"}
+KIND_ICON = {"shows": "tv", "movies": "film", "albums": "disc", "images": "image"}
 
 
 def folder_color(name: str) -> str:

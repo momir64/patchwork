@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QInputDialog, QMainWind
 
 from ..core.config import DATA_DIR, RES, Config
 from ..core import editions
-from ..core.library import KINDS, Library
+from ..core.library import KINDS, LIBRARIES, Library
 from ..sources import Sync
 from ..sources.sync import Cancelled
 from . import icons, theme
@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.page_for = {}                              # nav key -> widget
         self._stale = set()                             # media pages that need a reload before they are shown
-        for kind in KINDS:
+        for kind in LIBRARIES:
             self._add_media_page(kind, MediaPage(self.state, kind=kind, lazy=True))
         self.collage = CollagePage(self.state)
         self.collage.log.connect(self.add_log)
@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         self._register("collage", self.collage)
 
         # ---- sidebar (libraries + groups, collage / sync / settings / log at the bottom)
-        self.sidebar = Sidebar({k: self.state.libs[k].title for k in KINDS})
+        self.sidebar = Sidebar({k: self.state.libs[k].title for k in LIBRARIES})
         self.sidebar.navigate.connect(self.go)
         self.sidebar.new_group.connect(self.create_group)
         self.sidebar.group_menu.connect(self.group_context)
@@ -167,8 +167,8 @@ class MainWindow(QMainWindow):
         return [p for p in self.page_for.values() if isinstance(p, MediaPage)]
 
     def update_counts(self):
-        self.sidebar.set_counts({k: len(self.state.libs[k].shown_items()) for k in KINDS})
-        for k in KINDS:
+        self.sidebar.set_counts({k: len(self.state.libs[k].shown_items()) for k in LIBRARIES})
+        for k in LIBRARIES:
             self.sidebar.set_groups(k, self._group_rows(k))
         self.sidebar.set_current(self.current_key)
 
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         self.collage.reload_groups()
 
     def rebuild_groups(self):
-        wanted = {(k, n) for k in KINDS for n in self.state.groups.names(k)}
+        wanted = {(k, n) for k in LIBRARIES for n in self.state.groups.names(k)}
         for key in [g for g in self.group_pages if g not in wanted]:
             page = self.group_pages.pop(key)
             self.page_for.pop(f"group:{key[0]}:{key[1]}", None)
@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
             page.group_renamed.connect(self.group_renamed)
             self._add_media_page(f"group:{key[0]}:{key[1]}", page)
             self.group_pages[key] = page
-        for k in KINDS:
+        for k in LIBRARIES:
             self.sidebar.set_groups(k, self._group_rows(k))
         for p in self.all_media_pages():
             if p.kind:

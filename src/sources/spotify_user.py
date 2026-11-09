@@ -1,7 +1,7 @@
 """Spotify with your own login (authorization code flow with PKCE): reads your saved albums, liked songs and playlists
 straight from your account, so no data export is needed.
 
-It uses the Client ID of your own Spotify app (no secret is sent). The app needs REDIRECT_URI among its redirect URIs. The
+It uses the Client ID of your own Spotify app (no secret is sent). The app needs the redirect address (REDIRECT_URI, or SPOTIFY_REDIRECT_URI) among its redirect URIs. The
 login is kept in data/spotify_auth.json (a refresh token: it never leaves your computer and is not part of an export)."""
 import base64
 import hashlib
@@ -18,17 +18,36 @@ from . import spotify_api
 from .http import TIMEOUT
 
 PORT = 8765
-REDIRECT_URI = f"http://127.0.0.1:{PORT}/callback"
+REDIRECT_URI = f"http://127.0.0.1:{PORT}/callback"                 # the default; SPOTIFY_REDIRECT_URI can change it
 SCOPES = "user-library-read playlist-read-private playlist-read-collaborative user-top-read"
 AUTH_URL = "https://accounts.spotify.com/authorize"
 API = "https://api.spotify.com/v1"
 AUTH_FILE = DATA_DIR / "spotify_auth.json"
 _access = {"value": None, "until": 0.0}
 _lock = threading.Lock()
+notice = lambda text: None                          # where waits are reported (library() points it at the sync log)
 
 
 class NotSignedIn(RuntimeError):
     pass
+
+
+def redirect(cfg) -> str:
+    return cfg.get("SPOTIFY_REDIRECT_URI") or REDIRECT_URI
+
+
+def listen_on(uri):
+    """(host, port, path) the local sign-in server must answer on for a redirect address. Only a plain http address on this
+    computer works, because Patchwork itself catches the answer."""
+    u = urlparse(uri)
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    if u.scheme != "http" or u.hostname not in ("127.0.0.1", "localhost") or not port:
+        raise RuntimeError("The redirect address must look like http://127.0.0.1:8765/callback "
+                           "(http, 127.0.0.1 or localhost, and a port)")
+    return u.hostname, port, u.path or "/"
 
 
 # ---------------------------------------------------------------- login state
@@ -65,10 +84,11 @@ def _store(cfg, refresh_token, name=None):
 # ---------------------------------------------------------------- login
 class _Catcher(BaseHTTPRequestHandler):
     result = None
+    path_wanted = "/callback"
 
     def do_GET(self):
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
-        if urlparse(self.path).path != "/callback":
+        if urlparse(self.path).path != type(self).path_wanted:
             self.send_response(404)
             self.end_headers()
             return
@@ -96,14 +116,16 @@ def sign_in(cfg, cancel=None, timeout=180) -> str:
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     state = secrets.token_urlsafe(16)
+    uri = redirect(cfg)
+    host, port, _Catcher.path_wanted = listen_on(uri)
     _Catcher.result = None
     try:
-        server = HTTPServer(("127.0.0.1", PORT), _Catcher)
+        server = HTTPServer((host, port), _Catcher)
     except OSError:
-        raise RuntimeError(f"Port {PORT} is in use, close whatever uses it and try again")
+        raise RuntimeError(f"Port {port} is in use, close whatever uses it and try again")
     server.timeout = 0.4
     try:
-        webbrowser.open(AUTH_URL + "?" + urlencode({"client_id": cid, "response_type": "code", "redirect_uri": REDIRECT_URI,
+        webbrowser.open(AUTH_URL + "?" + urlencode({"client_id": cid, "response_type": "code", "redirect_uri": uri,
                                                     "scope": SCOPES, "state": state, "code_challenge_method": "S256",
                                                     "code_challenge": challenge}))
         end = time.time() + timeout
@@ -119,7 +141,7 @@ def sign_in(cfg, cancel=None, timeout=180) -> str:
     if got.get("state") != state or "code" not in got:
         raise RuntimeError("Spotify refused the login" + (f": {got['error']}" if got.get("error") else ""))
     r = spotify_api.session.post(spotify_api.TOKEN_URL, timeout=TIMEOUT, data={
-        "grant_type": "authorization_code", "code": got["code"], "redirect_uri": REDIRECT_URI, "client_id": cid,
+        "grant_type": "authorization_code", "code": got["code"], "redirect_uri": uri, "client_id": cid,
         "code_verifier": verifier})
     if r.status_code >= 400:
         raise RuntimeError("Spotify did not accept the login (check the redirect address of your app)")
@@ -169,6 +191,7 @@ def _get(cfg, path, **params):
             pause = int(r.headers.get("Retry-After", "2") or 2)
             if pause > 30:
                 raise RuntimeError(f"Spotify rate limit reached (retry after {pause} s)")
+            notice(f"[Spotify] rate limited, waiting {pause + 1} s...")
             spotify_api._sleep(pause + 1)
             continue
         r.raise_for_status()
@@ -176,12 +199,23 @@ def _get(cfg, path, **params):
     raise RuntimeError("Spotify keeps rate limiting, try again later")
 
 
-def _pages(cfg, path, **params):
-    url = path
-    while url:
+TOP_DEPTH = 1000          # Spotify ranks tens of thousands of songs for the top list; only the first ones say anything
+
+
+def _pages(cfg, path, on_page=None, cap=None, **params):
+    """Every item of a paged list (the first `cap` of them when given). on_page(items so far, total) is called after each page
+    (total can be None)."""
+    url, count = path, 0
+    for _ in range(1000):                                 # a guard: never page forever
+        if not url or (cap and count >= cap):
+            return
         data = _get(cfg, url, **params).json()
-        yield from data.get("items") or []
-        url, params = data.get("next"), {}
+        items = data.get("items") or []
+        count += len(items)
+        yield from items
+        if on_page:
+            on_page(count, min(data.get("total") or 0, cap) if cap and data.get("total") else data.get("total"))
+        url, params = (data.get("next") if items else None), {}
 
 
 def _album_key(album):
@@ -193,27 +227,48 @@ def _album_key(album):
 def library(cfg, liked=True, playlists=True, top=True, log=print, progress=None):
     """-> (saved, liked, playlists, top): the first three in the shape spotify.read gives for the export files,
     saved = {(artist, album): uri}; liked / playlists / top = {(artist, album): {track ids}}."""
+    global notice
     saved, lk, pl, tp = {}, {}, {}, {}
     progress = progress or (lambda done, total: None)
-    for item in _pages(cfg, "/me/albums", limit=50):
+    notice = log
+    log("[Spotify] reading saved albums...")
+
+    def reporter(what, every=0):
+        """Moves the progress bar with the pages read and (optionally) logs every `every` items."""
+        last = [0]
+
+        def on_page(count, total):
+            if total:
+                progress(count, total)
+            if every and total and count - last[0] >= every and count < total:
+                last[0] = count
+                log(f"[Spotify] {what}: {count}/{total}")
+        return on_page
+
+    for item in _pages(cfg, "/me/albums", reporter("saved albums", 500), limit=50):
         key = _album_key(item.get("album") or {})
         if key:
             saved[key] = (item.get("album") or {}).get("uri") or ""
     log(f"[Spotify] {len(saved)} saved albums")
     if liked:
-        for item in _pages(cfg, "/me/tracks", limit=50):
+        log("[Spotify] reading liked songs...")
+        for item in _pages(cfg, "/me/tracks", reporter("liked songs", 2000), limit=50):
             t = item.get("track") or {}
             key = _album_key(t.get("album") or {})
             if key:
                 lk.setdefault(key, set()).add(t.get("uri") or t.get("id"))
         log(f"[Spotify] {len(lk)} albums in liked songs")
     if top:
+        log("[Spotify] reading top songs...")
         for span in ("long_term", "medium_term", "short_term"):
             try:
-                for t in _pages(cfg, "/me/top/tracks", limit=50, time_range=span):
+                n = 0
+                for t in _pages(cfg, "/me/top/tracks", reporter(f"top songs ({span.split('_')[0]} term)", 500), cap=TOP_DEPTH, limit=50, time_range=span):
+                    n += 1
                     key = _album_key((t or {}).get("album") or {})
                     if key:
                         tp.setdefault(key, set()).add(t.get("uri") or t.get("id"))
+                log(f"[Spotify] top songs ({span.split('_')[0]} term): {n}")
             except Exception as e:
                 if "cancelled" in str(e):
                     raise
@@ -221,7 +276,9 @@ def library(cfg, liked=True, playlists=True, top=True, log=print, progress=None)
                 break
         log(f"[Spotify] {len(tp)} albums in top songs")
     if playlists:
+        log("[Spotify] reading playlists...")
         lists = [p for p in _pages(cfg, "/me/playlists", limit=50) if p and p.get("id")]
+        log(f"[Spotify] {len(lists)} playlists to read")
         for i, p in enumerate(lists, 1):
             progress(i, len(lists))
             try:
