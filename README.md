@@ -2,7 +2,7 @@
 
 A desktop app that collects the shows, movies and albums you watch and listen to, and turns them into poster collages.
 
-![Patchwork album library](docs/screenshots/library-albums.webp)
+[![Patchwork album library](docs/screenshots/library-albums.webp)](docs/screenshots/library-albums.png)
 
 ## Overview
 
@@ -23,17 +23,17 @@ It is written in Python with PySide6 (Qt) and also ships with a command-line int
 - **Collages.** Build from favorites, a group, a selection or everything. Justified rows or a fixed grid, any aspect
   ratio, ordered A-Z, shuffled or by color. The live preview re-renders at full detail as you zoom in.
 
-![Shows library](docs/screenshots/library-shows.webp)
+[![Shows library](docs/screenshots/library-shows.webp)](docs/screenshots/library-shows.png)
 
-![Selecting albums and adding them to a group](docs/screenshots/selection-context-menu.webp)
+[![Selecting albums and adding them to a group](docs/screenshots/selection-context-menu.webp)](docs/screenshots/selection-context-menu.png)
 
 ## Collages
 
 | Shows (favorites, shuffled) | Albums (sorted by color, diagonal) |
 | --- | --- |
-| ![Shows collage](docs/collages/shows-favorites.webp) | ![Albums collage, sorted by color diagonally](docs/collages/albums-color-diagonal.webp) |
+| [![Shows collage](docs/collages/shows-favorites.webp)](docs/collages/shows-favorites.png) | [![Albums collage, sorted by color diagonally](docs/collages/albums-color-diagonal.webp)](docs/collages/albums-color-diagonal.png) |
 
-![Albums collage, sorted by color from dark to light](docs/collages/albums-color-horizontal.webp)
+[![Albums collage, sorted by color from dark to light](docs/collages/albums-color-horizontal.webp)](docs/collages/albums-color-horizontal.png)
 
 ## Setup
 
@@ -80,7 +80,7 @@ sync options, where you can pick the sources, steps and media types.
 
 | Albums | Shows |
 | --- | --- |
-| ![Collage page with albums](docs/screenshots/collage-builder-albums.webp) | ![Collage page with shows](docs/screenshots/collage-builder-shows.webp) |
+| [![Collage page with albums](docs/screenshots/collage-builder-albums.webp)](docs/screenshots/collage-builder-albums.png) | [![Collage page with shows](docs/screenshots/collage-builder-shows.webp)](docs/screenshots/collage-builder-shows.png) |
 
 Ctrl + scroll or Ctrl +/- changes the poster size, Ctrl+A selects everything shown and Ctrl+Z undoes a selection change.
 
