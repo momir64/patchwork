@@ -355,6 +355,10 @@ class MainWindow(QMainWindow):
             for p in self.all_media_pages():
                 p.set_syncing(on)
 
+    def _data_busy(self, on, text):
+        """Exporting / importing your data: the sidebar's loading line runs; there is nothing to cancel."""
+        self.sidebar.set_syncing(on or bool(self.sync_job), text=text if on else "Syncing...")
+
     def cancel_sync(self):
         dlg = getattr(self, "settings_dialog", None)
         if not self.sync_cancel and dlg is not None and getattr(dlg, "importing", False):
@@ -394,6 +398,7 @@ class MainWindow(QMainWindow):
         dlg.status.connect(self.show_status)
         dlg.progress.connect(self.sidebar.set_progress)
         dlg.busy.connect(lambda on: self._import_busy(on, dlg))
+        dlg.data_busy.connect(self._data_busy)
 
         def closed(result):
             self.settings_dialog = None

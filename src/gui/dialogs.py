@@ -180,6 +180,7 @@ class SettingsDialog(Modal):
     status = Signal(str)        # status row only (progress)
     progress = Signal(int, int)  # the loading line in the sidebar
     busy = Signal(bool)         # an import is running
+    data_busy = Signal(bool, str)   # an export / import of your data is running (and what to call it)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent, "Settings", 800, modal=False)
@@ -223,6 +224,7 @@ class SettingsDialog(Modal):
 
     def data_page(self):
         f, v = card("Your data", None, divider=False)
+        self.data_btns = []
 
         def lines(*sentences):
             tight = QVBoxLayout()                     # the lines of one text belong together: almost no space between them
@@ -238,6 +240,7 @@ class SettingsDialog(Modal):
             v.addSpacing(4)
             btn = button(text, icon)
             btn.clicked.connect(slot)
+            self.data_btns.append(btn)
             row = QHBoxLayout()
             row.addWidget(btn)
             row.addStretch()
@@ -595,26 +598,54 @@ class SettingsDialog(Modal):
         spotify_user.sign_out()
         self.spotify_account_state()
 
+    def run_data_job(self, title, work, done):
+        """Export / import in the background: the loading line in the sidebar runs (and fills with the posters handled),
+        and the buttons wait until it is finished. work(progress) -> result, done(result) -> text for the page."""
+        verb = {"Export": "Exporting", "Import": "Importing"}[title]
+        for b in self.data_btns:
+            b.setEnabled(False)
+        self.data_msg.setText(f"{verb}...")
+        self.status.emit(f"{verb}...")
+        self.data_busy.emit(True, f"{verb}...")
+        self.progress.emit(0, 0)
+        job = Job(work)
+
+        def on_progress(a, b):
+            self.progress.emit(a, b)
+            text = f"{verb}  ·  {100 * a // max(1, b)}%"
+            self.data_msg.setText(text)
+            self.status.emit(text)
+
+        def end(text, ok=True):
+            for b in self.data_btns:
+                b.setEnabled(True)
+            self.data_busy.emit(False, "")
+            self.data_msg.setText(text)
+            self.note.emit(text)
+            if not ok:
+                notify(self, title, text)
+
+        job.progress.connect(on_progress)
+        job.done.connect(lambda result: end(done(result)))
+        job.failed.connect(lambda m: end(f"{title} failed: {m}", False))
+        job.finished.connect(lambda: self.jobs.remove(job))
+        self.jobs.append(job)
+        job.start()
+
     def export_data(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export data", "patchwork-data.zip", "With posters (*.zip);;Data only (*.json)")
         if path:
-            try:
-                transfer.export_data(path, lambda m: None)
-                self.data_msg.setText(f"Exported to {path}")
-            except Exception as e:
-                notify(self, "Export", f"Export failed: {e}")
+            self.run_data_job("Export", lambda progress: transfer.export_data(path, lambda m: None, progress), lambda _: f"Exported to {path}")
 
     def import_data(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import data", "", "Patchwork export (*.zip *.json)")
         if not path:
             return
-        try:
-            counts = transfer.import_data(path, log=lambda m: None)
-        except Exception as e:
-            notify(self, "Import", f"Import failed: {e}")
-            return
-        self.imported = True
-        self.data_msg.setText("Imported: " + ", ".join(f"{k} +{c['added']}" for k, c in counts.items()))
+
+        def done(counts):
+            self.imported = True
+            return "Imported: " + ", ".join(f"{k} +{c['added']}" for k, c in counts.items())
+        self.run_data_job("Import", lambda progress: transfer.import_data(path, log=lambda m: None, progress=progress), done)
 
     def values(self):
         out = {}

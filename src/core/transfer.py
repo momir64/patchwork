@@ -39,7 +39,7 @@ def collect(log=print):
             "kinds": kinds, "aliases": aliases}
 
 
-def export_data(path, log=print) -> Path:
+def export_data(path, log=print, progress=None) -> Path:
     path = Path(path)
     data = collect(log)
     text = json.dumps(data, ensure_ascii=False, indent=1)
@@ -49,12 +49,14 @@ def export_data(path, log=print) -> Path:
         return path
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(DATA_NAME, text, compress_type=zipfile.ZIP_DEFLATED)
-        n = 0
+        n, total = 0, sum(len(b["posters"]) for b in data["kinds"].values())
         for kind, block in data["kinds"].items():
             lib = Library(kind)
             for label in block["posters"]:
                 z.write(lib.poster(label), f"posters/{kind}/{lib.poster(label).name}", compress_type=zipfile.ZIP_STORED)
                 n += 1
+                if progress:
+                    progress(n, total)
     log(f"Exported data and {n} posters to {path.name}")
     return path
 
@@ -67,12 +69,13 @@ def _read(path):
     return json.loads(z.read(DATA_NAME).decode("utf-8")), z
 
 
-def import_data(path, overwrite_posters=False, log=print) -> dict:
+def import_data(path, overwrite_posters=False, log=print, progress=None) -> dict:
     """Merge an export into the current data. Returns counts per kind."""
     data, z = _read(path)
     if data.get("format") != FORMAT:
         raise ValueError("This is not a Patchwork export file.")
-    groups, counts = Groups(), {}
+    groups, counts, done = Groups(), {}, 0
+    total = sum(len(b.get("posters", {})) for k, b in data["kinds"].items() if k in KIND_NAMES) if z else 0
     for kind, block in data["kinds"].items():
         if kind not in KIND_NAMES:
             continue
@@ -91,6 +94,9 @@ def import_data(path, overwrite_posters=False, log=print) -> dict:
                 lib.meta.update(label, meta)
         posters = 0
         for label, fname in block.get("posters", {}).items():
+            done += 1
+            if progress and total:
+                progress(done, total)
             member = f"posters/{kind}/{fname}"
             if z and lib.has(label) and member in z.namelist() and (overwrite_posters or not lib.poster(label)):
                 lib.set_poster(label, z.read(member), Path(fname).suffix or ".jpg")
