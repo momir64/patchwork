@@ -254,7 +254,7 @@ class CollagePage(QWidget):
         self.color_from = Segmented(list(COLOR_FROM), "average")
         option_tips(self.color_from, {"average": "Mean color of the whole cover.", "dominant": "The most common hue of the cover.",
                                       "accent": "The most colorful part of the cover."})
-        self.reverse = Btn("", "sort", "toggle", "Reverse the order", size=16, pad=0)
+        self.reverse = Btn("", "sort", "toggle", "Reverse the order", size=16, pad=0, color=theme.TEXT)    # the icon keeps its color when on
         self.reverse.setCheckable(True)
         self.reverse.setFixedWidth(theme.HEIGHT + 2)
         self.fit = Segmented([("Keep whole", "keep"), ("Crop to fit", "crop")], "keep")
@@ -600,10 +600,11 @@ class CollagePage(QWidget):
     def preview_done(self, res):
         layout, qimg, src, size = res
         self.preview.show_pixmap(QPixmap.fromImage(qimg), src)
-        crop = f"  ·  crop up to {layout.spread:.1%}" if layout.spread else ""
+        gap = " "                                    # an em space between the specs instead of a dot
+        crop = f"{gap}crop up to {layout.spread:.1%}" if layout.spread else ""
         mb = size / 1048576
         approx = f"~{mb:.1f} MB" if mb >= 1 else f"~{max(1, round(size / 1024))} KB"
-        self.info.setText(f"{len(layout.cells)} items  ·  {layout.rows} rows  ·  {layout.width} × {layout.height}px  ·  ratio {layout.width / layout.height:.2f}  ·  {approx}{crop}")
+        self.info.setText(f"{len(layout.cells)} items{gap}{layout.rows} rows{gap}{layout.width} × {layout.height}px{gap}ratio {layout.width / layout.height:.2f}{gap}{approx}{crop}")
 
     def render_detail(self, region, s, gen):
         """Re-render the zoomed-in part of the preview from the full-size layout (one at a time, newest request wins)."""
