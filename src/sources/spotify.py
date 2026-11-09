@@ -39,9 +39,13 @@ def read(paths):
 
 
 def entries(paths, liked=True, playlists=True, min_tracks=3) -> list:
-    saved, lk, pl = read([Path(p) for p in paths])
+    return entries_from(*read([Path(p) for p in paths]), liked=liked, playlists=playlists, min_tracks=min_tracks)
+
+
+def entries_from(saved, lk, pl, liked=True, playlists=True, min_tracks=3, top=None) -> list:
+    """The albums to import out of what read() or spotify_user.library() found."""
     tracks = {}
-    for use, src in ((liked, lk), (playlists, pl)):
+    for use, src in ((liked, lk), (playlists, pl), (bool(top), top or {})):
         if use:
             for key, ids in src.items():
                 tracks.setdefault(key, set()).update(ids)

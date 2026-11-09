@@ -5,13 +5,14 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
-                               QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
+                               QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..core import covers, editions, transfer
 from ..core.library import KINDS, Library, add_alias, title_from_label
 from ..sources import Sync
 from ..core.config import ENV_PATH, KEYS
 from ..sources import test_connection
+from ..sources import spotify_user
 from ..sources.sync import KINDS, SOURCES, STEPS, Cancelled
 from . import theme
 from .chrome import Modal, notify
@@ -66,6 +67,7 @@ SOURCE_INFO = {  # key -> (title, description, config check)
     "trakt_shows": ("Trakt - shows", "Watch history, collection, ratings", lambda c: c.trakt_ready),
     "trakt_movies": ("Trakt - movies", "Watch history, collection, ratings", lambda c: c.trakt_ready),
     "lastfm": ("Last.fm", "Your top albums", lambda c: c.lastfm_ready),
+    "spotify": ("Spotify", "Saved albums, liked songs, playlists", lambda c: spotify_user.signed_in(c)),
 }
 STEP_INFO = {
     "titles": ("Add new items", "Never deletes anything"),
@@ -150,7 +152,8 @@ SECTIONS = (
     ("Trakt", "Watch history of a public profile", "trakt", ("TRAKT_CLIENT_ID", "TRAKT_USER", "TRAKT_FAV_MIN_RATING", "TRAKT_SYNC_FAVORITES")),
     ("Last.fm", "Your played albums", "lastfm", ("LASTFM_API_KEY", "LASTFM_USER", "LASTFM_SOURCE", "LASTFM_PERIOD", "LASTFM_LIMIT")),
     ("TMDB", "Posters and details for shows and movies", None, ("TMDB_API_KEY",)),
-    ("Spotify API", "Your own free Spotify app (developer.spotify.com/dashboard): create an app and paste its Client ID and Client secret",
+    ("Spotify", "Your own free Spotify app (developer.spotify.com/dashboard): add the redirect address below, paste its Client ID and "
+     "secret, then sign in. The secret is only used for release years and covers.",
      "spotify", ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET")),
 )
 CHECKS = {"SONARR_ONLY_DOWNLOADED": "Skip shows without files", "RADARR_ONLY_DOWNLOADED": "Skip movies without files",
@@ -191,7 +194,6 @@ class SettingsDialog(Modal):
         self.add_page("Your data", self.data_page())
         for title, desc, test, keys in SECTIONS:
             self.add_page(title, self.section_page(title, desc, test, keys))
-        self.add_page("Spotify", self.spotify_page())
         row = QHBoxLayout()
         row.setSpacing(18)
         row.addWidget(self.nav)
@@ -255,7 +257,7 @@ class SettingsDialog(Modal):
         return f
 
     def spotify_page(self):
-        f, v = card("Spotify", "Import albums from your Spotify data export", divider=False, gap=9)
+        f, v = card("Import from file", "Preferred over the account sync for large playlists and saved libraries", gap=9)
         self.sp_files = []
 
         def step(n, title):
@@ -297,7 +299,7 @@ class SettingsDialog(Modal):
         self.sp_liked, self.sp_play = QCheckBox("Liked songs"), QCheckBox("Playlists")
         b.addWidget(self.sp_liked)
         b.addWidget(self.sp_play)
-        self.sp_min = UnitSpin("songs")
+        self.sp_min = UnitSpin("songs", "song")
         self.sp_min.setRange(1, 50)
         self.sp_min.setValue(3)
         self.sp_min.setFixedWidth(96)
@@ -478,7 +480,119 @@ class SettingsDialog(Modal):
             trow.addWidget(btn)
             trow.addWidget(out, 1)
             v.addLayout(trow)
+        if title == "Spotify":
+            self.spotify_login(v)
+            self.spotify_account_options(v)
+            v.addSpacing(6)
+            v.addWidget(self.spotify_page())
         return f
+
+    # ---- Spotify sign-in (the account is read on every sync; the export-file import below does not need it)
+    def spotify_login(self, v):
+        v.addSpacing(14)
+        v.addWidget(label("Sign in", "cardtitle"))
+        v.addWidget(label("Add this redirect address to your Spotify app (Settings -> Redirect URIs), then sign in. "
+                          "Sync then reads your saved albums, liked songs, playlists and top songs directly.", "dim", wrap=True))
+        uri = QLineEdit(spotify_user.REDIRECT_URI)
+        uri.setReadOnly(True)
+        copy = button("Copy", "copy")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(spotify_user.REDIRECT_URI))
+        urow = QHBoxLayout()
+        urow.setSpacing(10)
+        urow.addWidget(uri, 1)
+        urow.addWidget(copy)
+        v.addLayout(urow)
+        self.sp_login_btn = button("Sign in with Spotify", "link", "primary")
+        self.sp_logout_btn = button("Sign out", "x")
+        self.sp_account = label("", "muted", wrap=True)
+        self.sp_login_btn.clicked.connect(self.spotify_sign_in)
+        self.sp_logout_btn.clicked.connect(self.spotify_sign_out)
+        lrow = QHBoxLayout()
+        lrow.setSpacing(12)
+        lrow.addWidget(self.sp_login_btn)
+        lrow.addWidget(self.sp_logout_btn)
+        lrow.addWidget(self.sp_account, 1)
+        v.addLayout(lrow)
+        self.sp_login_cancel = threading.Event()
+        self.sp_signing_in = False
+        self.spotify_account_state()
+
+    def spotify_account_options(self, v):
+        """What a sync takes from the signed-in account (same wording as the file import below)."""
+        v.addSpacing(14)
+        v.addWidget(label("Choose what to import", "cardtitle"))
+        v.addWidget(label("Saved albums are always imported.", "dim"))
+        boxes = QVBoxLayout()
+        boxes.setSpacing(4)
+        for key, text in (("SPOTIFY_TOP", "Top songs"), ("SPOTIFY_LIKED", "Liked songs"), ("SPOTIFY_PLAYLISTS", "Playlists")):
+            cb = QCheckBox(text)
+            cb.setChecked(self.cfg.flag(key))
+            self.fields[key] = cb
+            boxes.addWidget(cb)
+        v.addLayout(boxes)
+        spin = UnitSpin("songs", "song")
+        spin.setRange(1, 50)
+        spin.setValue(self.cfg.integer("SPOTIFY_MIN_SONGS", 1))
+        spin.setFixedWidth(96)
+        self.fields["SPOTIFY_MIN_SONGS"] = spin
+        lbls = [label("Skip albums with fewer than", "dim"), label("in these lists", "dim")]
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(lbls[0])
+        row.addWidget(spin)
+        row.addWidget(lbls[1])
+        row.addStretch()
+        v.addLayout(row)
+
+        def sync_min():
+            on = any(self.fields[k].isChecked() for k in ("SPOTIFY_TOP", "SPOTIFY_LIKED", "SPOTIFY_PLAYLISTS"))
+            spin.setEnabled(on)
+            for l in lbls:
+                l.setEnabled(on)
+        for k in ("SPOTIFY_TOP", "SPOTIFY_LIKED", "SPOTIFY_PLAYLISTS"):
+            self.fields[k].toggled.connect(sync_min)
+        sync_min()
+
+    def spotify_account_state(self, text=None):
+        """Shows who is signed in and which buttons make sense."""
+        who = spotify_user.user_name(self.cfg)
+        self.sp_logout_btn.setVisible(bool(who) and not self.sp_signing_in)
+        self.sp_login_btn.setText("Cancel" if self.sp_signing_in else ("Sign in again" if who else "Sign in with Spotify"))
+        self.sp_account.setText(text if text is not None else (f"Signed in as {who}" if who else "Not signed in"))
+
+    def spotify_sign_in(self):
+        if self.sp_signing_in:                              # the button is "Cancel" while the browser login is open
+            self.sp_login_cancel.set()
+            return
+        values = self.values()
+        self.cfg.values.update(values)
+        if not self.cfg.get("SPOTIFY_CLIENT_ID"):
+            self.spotify_account_state("Enter the Client ID first.")
+            return
+        self.sp_login_cancel.clear()
+        self.sp_signing_in = True
+        self.spotify_account_state("Waiting for the Spotify login in your browser...")
+        job = Job(lambda _p: spotify_user.sign_in(self.cfg, self.sp_login_cancel))
+
+        def done(name):
+            self.sp_signing_in = False
+            self.cfg.save({k: v for k, v in values.items() if k.startswith("SPOTIFY")})     # the app the login belongs to is kept
+            self.spotify_account_state(f"Signed in as {name}")
+            self.note.emit(f"Spotify: signed in as {name}")
+
+        def failed(msg):
+            self.sp_signing_in = False
+            self.spotify_account_state("Cancelled" if "cancelled" in msg else "Failed: " + msg.split(": ", 1)[-1])
+
+        job.done.connect(done)
+        job.failed.connect(failed)
+        job.finished.connect(lambda: self.jobs.remove(job))
+        self.jobs.append(job)
+        job.start()
+
+    def spotify_sign_out(self):
+        spotify_user.sign_out()
+        self.spotify_account_state()
 
     def export_data(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export data", "patchwork-data.zip", "With posters (*.zip);;Data only (*.json)")
@@ -505,7 +619,7 @@ class SettingsDialog(Modal):
         out = {}
         for k, w in self.fields.items():
             out[k] = (("true" if w.isChecked() else "false") if isinstance(w, QCheckBox)
-                      else w.currentData() if isinstance(w, QComboBox) else w.text().strip())
+                      else w.currentData() if isinstance(w, QComboBox) else str(w.value()) if isinstance(w, QSpinBox) else w.text().strip())
         return out
 
     def test(self, which, out):

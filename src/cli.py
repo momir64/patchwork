@@ -12,7 +12,7 @@ def build_parser():
     p = argparse.ArgumentParser(prog="patchwork", description="Collages of the media you consumed.")
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("sync", help="update lists/posters from Sonarr, Radarr, Trakt, Last.fm")
-    s.add_argument("sources", nargs="*", choices=["sonarr", "radarr", "trakt", "lastfm"], help="default: all configured")
+    s.add_argument("sources", nargs="*", choices=["sonarr", "radarr", "trakt", "lastfm", "spotify"], help="default: all configured")
     s.add_argument("--only", nargs="+", choices=["titles", "posters", "metadata"], help="run just these steps")
     s.add_argument("--kinds", nargs="+", choices=list(KINDS), help="limit posters/metadata to these media types")
     s.add_argument("--refresh-metadata", action="store_true", help="re-fetch metadata even where it exists")
@@ -47,6 +47,7 @@ def build_parser():
     sp.add_argument("--no-playlists", action="store_true")
     sp.add_argument("--no-posters", action="store_true", help="skip downloading covers")
     sp.add_argument("--metadata", action="store_true", help="also fetch genres / country (about 1 artist per second)")
+    sub.add_parser("spotify-login", help="sign in to Spotify in the browser, so that sync can read your account")
     i = sub.add_parser("import-legacy", help="import the old series_collage folder")
     i.add_argument("path", type=Path)
     return p
@@ -67,7 +68,7 @@ def run(argv):
         from .sources.sync import STEPS
         cfg = Config()
         libs = {k: Library(k) for k in KINDS}
-        names = a.sources or ["sonarr", "radarr", "trakt", "lastfm"]
+        names = a.sources or ["sonarr", "radarr", "trakt", "lastfm", "spotify"]
         sources = [x for n in names for x in (("trakt_shows", "trakt_movies") if n == "trakt" else (n,))]
         res = Sync(cfg, libs, log=print).run(sources, tuple(a.only or STEPS), tuple(a.kinds or KINDS), a.refresh_metadata)
         print("Done:", ", ".join(res) or "nothing to do")
@@ -102,6 +103,10 @@ def run(argv):
         libs = {k: Library(k) for k in KINDS}
         Sync(Config(), libs, log=print).import_spotify(a.files, not a.no_liked, not a.no_playlists, a.min_tracks,
                                                        not a.no_posters, a.metadata)
+    elif a.cmd == "spotify-login":
+        from .sources import spotify_user
+        print("Opening Spotify in the browser. Redirect address of your app:", spotify_user.REDIRECT_URI)
+        print("Signed in as", spotify_user.sign_in(Config()))
     elif a.cmd == "import-legacy":
         from .importer import import_legacy
         import_legacy(a.path)

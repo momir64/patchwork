@@ -33,9 +33,9 @@ def kind_dir(kind: str) -> Path:
 
 # key -> (default, description)
 KEYS = {
-    "SONARR_URL": ("https://sonarr.moma.rs", "Sonarr address (TV shows)"),
+    "SONARR_URL": ("http://localhost:8989", "Sonarr address (TV shows)"),
     "SONARR_API_KEY": ("", "Sonarr -> Settings -> General -> API Key"),
-    "RADARR_URL": ("https://radarr.moma.rs", "Radarr address (movies)"),
+    "RADARR_URL": ("http://localhost:7878", "Radarr address (movies)"),
     "RADARR_API_KEY": ("", "Radarr -> Settings -> General -> API Key"),
     "SONARR_ONLY_DOWNLOADED": ("false", "true = only shows that actually have files in Sonarr"),
     "RADARR_ONLY_DOWNLOADED": ("false", "true = only movies that actually have files in Radarr"),
@@ -52,6 +52,10 @@ KEYS = {
     "TMDB_API_KEY": ("", "Fallback posters + genres/countries/creators for shows & movies"),
     "SPOTIFY_CLIENT_ID": ("", "https://developer.spotify.com/dashboard -> your app's Client ID"),
     "SPOTIFY_CLIENT_SECRET": ("", "https://developer.spotify.com/dashboard -> your app's Client secret"),
+    "SPOTIFY_LIKED": ("false", "true = albums of your liked songs are imported when you sync from your Spotify account"),
+    "SPOTIFY_PLAYLISTS": ("false", "true = albums of your playlists are imported when you sync from your Spotify account"),
+    "SPOTIFY_TOP": ("true", "true = albums of your top songs (Spotify's own ranking of what you play most) are imported when you sync from your Spotify account"),
+    "SPOTIFY_MIN_SONGS": ("1", "Songs an album needs in top songs / liked songs / playlists to be imported by an account sync (saved albums always count). The file import has its own setting"),
 }
 
 

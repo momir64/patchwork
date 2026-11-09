@@ -4,11 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..core.library import Library, load_aliases
 from ..core.names import norm_key
-from . import arr, covers, lastfm, musicbrainz, spotify, spotify_api, tmdb
+from . import arr, covers, lastfm, musicbrainz, spotify, spotify_api, spotify_user, tmdb
 from .http import download_image
 from .trakt import Trakt
 
-SOURCES = ("sonarr", "radarr", "trakt_shows", "trakt_movies", "lastfm")
+SOURCES = ("sonarr", "radarr", "trakt_shows", "trakt_movies", "lastfm", "spotify")
 STEPS = ("titles", "posters", "metadata")
 KINDS = ("shows", "movies", "albums")
 
@@ -66,6 +66,8 @@ class Sync:
                 plan.append(("Radarr", "movies", cfg.radarr_ready, lambda: arr.fetch_radarr(cfg)))
             if "lastfm" in sources:
                 plan.append(("Last.fm", "albums", cfg.lastfm_ready, lambda: lastfm.fetch_albums(cfg, self.log, self.progress)))
+            if "spotify" in sources:
+                plan.append(("Spotify", "albums", spotify_user.signed_in(cfg), self._spotify_entries))
             trakt = Trakt(cfg.get("TRAKT_CLIENT_ID"), cfg.get("TRAKT_USER"))
             for kind in ("shows", "movies"):
                 if f"trakt_{kind}" in sources:
@@ -129,6 +131,13 @@ class Sync:
             self.seen[kind].append(e)
         self.log(f"[{name}] {len(entries)} found, {added} new")
         self.summary.append(f"{name}: +{added}")
+
+    def _spotify_entries(self):
+        """Albums straight from your Spotify account (saved albums, liked songs, playlists)."""
+        cfg = self.cfg
+        liked, playlists, top = cfg.flag("SPOTIFY_LIKED"), cfg.flag("SPOTIFY_PLAYLISTS"), cfg.flag("SPOTIFY_TOP")
+        saved, lk, pl, tp = spotify_user.library(cfg, liked, playlists, top, self.log, self.progress)
+        return spotify.entries_from(saved, lk, pl, liked, playlists, cfg.integer("SPOTIFY_MIN_SONGS", 1), top=tp)
 
     def _trakt_entries(self, trakt, kind):
         entries, self._ratings = trakt.collect(kind, self.progress)
@@ -372,7 +381,8 @@ def test_connection(which, cfg) -> str:
             return "OK - Last.fm user found"
         if which == "spotify":
             spotify_api.check(cfg)
-            return "OK - Spotify credentials accepted"
+            who = spotify_user.user_name(cfg)
+            return "OK - Spotify credentials accepted" + (f", signed in as {who}" if who else ", not signed in yet")
     except Exception as e:
         return f"Failed - {e}"
     return "Unknown source"

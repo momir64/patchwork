@@ -549,8 +549,10 @@ class UnitSpin(QSpinBox):
     """Number input whose unit (px, %...) is shown right-aligned inside the field, outside the editable text,
     so typing never has to deal with it."""
 
-    def __init__(self, unit=""):
+    def __init__(self, unit="", singular=None):
+        """singular: the unit shown while the value is 1 ('song' for 'songs')."""
         super().__init__()
+        self.unit, self.singular = unit, singular
         self.unit_lbl = QLabel(unit, self.lineEdit())
         self.unit_lbl.setStyleSheet(f"color: {theme.DIM}; background: transparent;")
         self.unit_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -561,6 +563,7 @@ class UnitSpin(QSpinBox):
 
     def _place(self, *_):
         le = self.lineEdit()
+        self.unit_lbl.setText(self.singular if self.singular and self.value() == 1 else self.unit)
         self.unit_lbl.adjustSize()
         self.unit_lbl.move(le.width() - self.unit_lbl.width() - 2, (le.height() - self.unit_lbl.height()) // 2)
         self.unit_lbl.setVisible(not (self.specialValueText() and self.value() == self.minimum()))

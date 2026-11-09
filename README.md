@@ -13,9 +13,9 @@ It is written in Python with PySide6 (Qt) and also ships with a command-line int
 
 ## Features
 
-- **Syncing.** Sonarr and Radarr for what you own, Trakt for what you have watched and rated, Last.fm and Spotify data
-  exports for what you listen to. Posters and details come from those sources, with TMDB, MusicBrainz, Deezer,
-  iTunes and the Spotify API as fallbacks.
+- **Syncing.** Sonarr and Radarr for what you own, Trakt for what you have watched and rated, Last.fm and Spotify (your
+  account, or a data export) for what you listen to. Posters and details come from those sources, with TMDB,
+  MusicBrainz, Deezer and iTunes as fallbacks.
 - **Browsing.** Shows, movies and albums each get their own library. Search, filter by genre, country, language or
   group, and sort by title, year, rating, plays, date added or cover color.
 - **Organizing.** Favorites, custom groups (drag to reorder), renaming, hiding, a metadata editor, and a duplicate
@@ -55,11 +55,23 @@ connection* button. The same values can be placed in a `.env` file (see `.env.ex
 | Trakt | a Client ID from your own Trakt app, and your public username |
 | Last.fm | an API key and your username |
 | TMDB | an API key, used for missing posters and details |
-| Spotify API | the Client ID and secret of your own free app from the Spotify developer dashboard, used for album release years and missing covers |
-| Spotify import | no key; the **Spotify** page in Settings imports the data export (JSON files) you can request from your account |
+| Spotify | your own free Spotify app (see below). Sync then reads your saved albums and top songs (liked songs and playlists are optional), and the app also supplies album release years and missing covers |
+| Spotify data export | no key; *Import from file* on the same page imports the data export (JSON files) you can request from your account. It is preferred for large playlists and saved libraries |
+
+To set up Spotify:
+
+1. Create a free app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
+2. Add `http://127.0.0.1:8765/callback` to the app's redirect URIs.
+3. Paste its Client ID and secret on the **Spotify** page in Settings and press *Sign in*. Your browser opens to
+   approve access.
+4. Choose what to import from the account. Top songs are on by default.
+
+API keys and the Spotify sign-in are stored in plain text in `.env` and `data/`, so keep those out of version control
+and out of any folder you share.
 
 Press **Sync** in the sidebar. The first run is slow, mostly because album genres, countries and release years come
-from MusicBrainz at about one artist per second. Later syncs only fetch what is new.
+from MusicBrainz at about one artist per second. Later syncs only fetch what is new. The button next to it opens the
+sync options, where you can pick the sources, steps and media types.
 
 ## Usage
 
@@ -100,7 +112,8 @@ stick. When packaged, use `patchwork-cli.exe` in place of `python main.py` in th
 Syncing, importing and collages also work without the GUI. Without a command, `main.py` opens the app.
 
 ```
-python main.py sync [sonarr|radarr|trakt|lastfm]
+python main.py sync [sonarr|radarr|trakt|lastfm|spotify]
+python main.py spotify-login
 python main.py collage shows --favs --aspect 2:3 --width 4000
 python main.py collage albums --order hue --direction diagonal
 python main.py import-spotify YourLibrary.json --metadata
@@ -127,6 +140,7 @@ data/
   output/
   aliases.json
   ui.json
+  spotify_auth.json
   crash.log
 ```
 
@@ -141,6 +155,7 @@ data/
 | `output/` | generated collages |
 | `aliases.json` | other spellings of a title, mapped to the one in your list |
 | `ui.json` | window preferences, poster size and group colors |
+| `spotify_auth.json` | your Spotify sign-in, never part of an export |
 | `crash.log` | the traceback of the last crash |
 
 **Settings -> Your data** exports all of it to a single file (API keys excluded) and imports it back.
