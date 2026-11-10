@@ -37,9 +37,11 @@ def build_parser():
     c.add_argument("--png", action="store_true")
     e = sub.add_parser("export", help="export all media data to one file (.zip with posters, or .json data only)")
     e.add_argument("path", type=Path)
+    e.add_argument("--settings", action="store_true", help="also include the settings (.env), API keys included")
     m = sub.add_parser("import", help="merge an export file into the current data")
     m.add_argument("path", type=Path)
     m.add_argument("--overwrite-posters", action="store_true")
+    m.add_argument("--settings", action="store_true", help="also import the settings (.env) when the file has them")
     sp = sub.add_parser("import-spotify", help="import albums from Spotify export files (YourLibrary.json, Playlist*.json)")
     sp.add_argument("files", nargs="+", type=Path)
     sp.add_argument("--min-tracks", type=int, default=3, help="songs an album needs in liked songs / playlists (saved albums always count)")
@@ -94,10 +96,10 @@ def run(argv):
         print("\nSaved", out)
     elif a.cmd == "export":
         from .core.transfer import export_data
-        export_data(a.path)
+        export_data(a.path, settings=a.settings)
     elif a.cmd == "import":
         from .core.transfer import import_data
-        import_data(a.path, a.overwrite_posters)
+        import_data(a.path, a.overwrite_posters, settings=a.settings)
     elif a.cmd == "import-spotify":
         from .sources import Sync
         libs = {k: Library(k) for k in KINDS}

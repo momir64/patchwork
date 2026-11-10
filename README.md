@@ -159,7 +159,8 @@ data/
 | `spotify_auth.json` | your Spotify sign-in, never part of an export |
 | `crash.log` | the traceback of the last crash |
 
-**Settings -> Your data** exports all of it to a single file (API keys excluded) and imports it back.
+**Settings -> Your data** exports all of it to a single file and imports it back. Your settings (`.env`, API keys included) are left out unless you tick
+**Include settings**, so keep a file made that way private.
 
 ## Project layout
 

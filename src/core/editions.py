@@ -205,6 +205,24 @@ def save_dup_hidden(kind, labels):
     write_json(_dup_file(kind), d)
 
 
+def export_state(kind) -> dict:
+    """Everything the duplicates dialog remembers for a kind (for the data export)."""
+    return _dup_state(kind)
+
+
+def merge_state(kind, data, lib):
+    """Add an exported duplicates state to the current one. Titles hidden as duplicates stay marked as such (so they show
+    under Duplicates, not Hidden); only titles that exist in `lib` count."""
+    d = _dup_state(kind)
+    d["separate"] = sorted(set(d["separate"]) | set(data.get("separate", [])))
+    d["hidden"] = sorted(set(d["hidden"]) | {l for l in data.get("hidden", []) if lib.has(l)})
+    have = {set_id(g) for g in d["manual"]}
+    d["manual"] += [g for g in data.get("manual", []) if set_id(g) not in have]
+    sets = {r["set"] for r in data.get("apart", [])}
+    d["apart"] = [r for r in d["apart"] if r["set"] not in sets] + list(data.get("apart", []))
+    write_json(_dup_file(kind), d)
+
+
 def sweep(lib) -> bool:
     """Unhide titles that were hidden as duplicates but are no longer part of a duplicate set (the other one was renamed,
     removed or marked 'not duplicates'). Returns True when something changed."""
@@ -212,6 +230,10 @@ def sweep(lib) -> bool:
     rec = load_dup_hidden(kind)
     if not rec:
         return False
+    if kind == "albums":
+        from . import covers
+        if not covers.complete(lib):                    # covers not compared yet (e.g. right after an import): do not guess,
+            return False                                # the duplicates dialog hashes them, and the next check decides
     live = {norm_key(l) for g in groups(lib.items, kind, lib) for l in g}
     keep, changed = set(), False
     for l in rec:

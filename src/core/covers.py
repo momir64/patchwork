@@ -88,6 +88,42 @@ def hash_posters(lib, progress=None, workers=None) -> int:
     return len(todo)
 
 
+def hashes_of(lib) -> dict:
+    """{label: hash} of the posters whose cached hash is current (for the data export)."""
+    data, out = _load(lib.kind), {}
+    for label in lib.items:
+        p = lib.poster(label)
+        hit = data.get(p.name) if p else None
+        try:
+            if hit and hit[:2] == _stamp(p):
+                out[label] = hit[2]
+        except OSError:
+            pass
+    return out
+
+
+def store_hashes(lib, hashes: dict):
+    """Put hashes of known covers into the cache (the data import, so duplicates are found again without hashing)."""
+    if not hashes:
+        return
+    data = dict(_load(lib.kind))
+    for label, h in hashes.items():
+        p = lib.poster(label)
+        if p:
+            try:
+                data[p.name] = _stamp(p) + [h]
+            except OSError:
+                pass
+    write_json(_file(lib.kind), data)
+    _cache["mtime"], _cache["data"] = None, {}
+
+
+def complete(lib) -> bool:
+    """Is every poster of `lib` hashed? Without that, 'same cover' duplicates can not be told apart yet."""
+    data = _load(lib.kind)
+    return all(not (p := lib.poster(l)) or p.name in data for l in lib.items)
+
+
 def _artist(lib, label) -> str:
     creators = lib.meta.get(label).get("creators")
     return (creators[0] if creators else label.split(" - ", 1)[0]).casefold().strip()

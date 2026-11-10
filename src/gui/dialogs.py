@@ -234,27 +234,36 @@ class SettingsDialog(Modal):
                 tight.addWidget(label(t, "dim", wrap=True))
             v.addLayout(tight)
 
-        def block(title, icon, text, sentences, slot):
+        def block(title, icon, text, sentences, slot, option, tip):
             v.addWidget(label(title, "cardtitle"))
             lines(*sentences)
             v.addSpacing(4)
             btn = button(text, icon)
             btn.clicked.connect(slot)
             self.data_btns.append(btn)
+            cb = QCheckBox(option)
+            cb.setToolTip(tip)
             row = QHBoxLayout()
+            row.setSpacing(14)
             row.addWidget(btn)
+            row.addWidget(cb)
             row.addStretch()
             v.addLayout(row)
             v.addSpacing(14)
+            return cb
 
         lines("Back up everything Patchwork knows about your media.", "Or move it to another computer.")
         v.addSpacing(8)
-        block("Export", "download", "Export...",
-              ("Saves your lists, favorites, metadata, groups and name fixes into one file.",
-               "Choose .zip to include the poster images, or .json for the data only."), self.export_data)
-        block("Import", "folder", "Import...",
-              ("Adds the contents of a file made by Export to your library.",
-               "Nothing you already have is deleted or replaced."), self.import_data)
+        self.export_settings = block(
+            "Export", "download", "Export...",
+            ("Saves your lists, favorites, metadata, groups and name fixes into one file.",
+             "Choose .zip to include the poster images, or .json for the data only."),
+            self.export_data, "Include settings", "Adds your settings (.env), API keys included, so keep that file private")
+        self.import_settings = block(
+            "Import", "folder", "Import...",
+            ("Adds the contents of a file made by Export to your library.",
+             "Nothing you already have is deleted or replaced."),
+            self.import_data, "Import settings too", "If the file has settings, they replace your current ones")
         self.data_msg = label("", "muted", wrap=True)
         v.addWidget(self.data_msg)
         return f
@@ -635,17 +644,40 @@ class SettingsDialog(Modal):
     def export_data(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export data", "patchwork-data.zip", "With posters (*.zip);;Data only (*.json)")
         if path:
-            self.run_data_job("Export", lambda progress: transfer.export_data(path, lambda m: None, progress), lambda _: f"Exported to {path}")
+            extra = self.export_settings.isChecked()
+            self.run_data_job("Export", lambda progress: transfer.export_data(path, lambda m: None, progress, extra),
+                              lambda _: f"Exported to {path}" + (" (with settings)" if extra else ""))
 
     def import_data(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import data", "", "Patchwork export (*.zip *.json)")
         if not path:
             return
 
+        extra = self.import_settings.isChecked()
+
         def done(counts):
             self.imported = True
-            return "Imported: " + ", ".join(f"{k} +{c['added']}" for k, c in counts.items())
-        self.run_data_job("Import", lambda progress: transfer.import_data(path, log=lambda m: None, progress=progress), done)
+            applied = counts.pop("settings", 0)
+            if applied:
+                self.cfg.reload()
+                self.load_fields()                  # the pages show the new values (closing this window saves what they show)
+            text = "Imported: " + ", ".join(f"{k} +{c['added']}" for k, c in counts.items())
+            if extra:
+                text += f", {applied} settings" if applied else " (the file has no settings)"
+            return text
+        self.run_data_job("Import", lambda progress: transfer.import_data(path, log=lambda m: None, progress=progress, settings=extra), done)
+
+    def load_fields(self):
+        """Put the saved settings into the form fields."""
+        for k, w in self.fields.items():
+            if isinstance(w, QCheckBox):
+                w.setChecked(self.cfg.flag(k))
+            elif isinstance(w, QComboBox):
+                w.setCurrentIndex(max(0, w.findData(self.cfg.get(k))))
+            elif isinstance(w, QSpinBox):
+                w.setValue(self.cfg.integer(k, w.value()))
+            else:
+                w.setText(self.cfg.get(k))
 
     def values(self):
         out = {}
