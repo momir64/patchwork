@@ -2,7 +2,8 @@
 straight from your account, so no data export is needed.
 
 It uses the Client ID of your own Spotify app (no secret is sent). The app needs the redirect address (REDIRECT_URI, or SPOTIFY_REDIRECT_URI) among its redirect URIs. The
-login is kept in data/spotify_auth.json (a refresh token: it never leaves your computer and is not part of an export)."""
+login is kept in data/spotify_auth.json (a refresh token: it stays on your computer, and only goes into an export when you tick
+"Include settings")."""
 import base64
 import hashlib
 import secrets
@@ -12,7 +13,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from ..core.config import DATA_DIR
+from ..core.config import SPOTIFY_AUTH_PATH
 from ..core.jsonstore import read_json, write_json
 from . import spotify_api
 from .http import TIMEOUT
@@ -22,7 +23,7 @@ REDIRECT_URI = f"http://127.0.0.1:{PORT}/callback"                 # the default
 SCOPES = "user-library-read playlist-read-private playlist-read-collaborative user-top-read"
 AUTH_URL = "https://accounts.spotify.com/authorize"
 API = "https://api.spotify.com/v1"
-AUTH_FILE = DATA_DIR / "spotify_auth.json"
+AUTH_FILE = SPOTIFY_AUTH_PATH
 _access = {"value": None, "until": 0.0}
 _lock = threading.Lock()
 notice = lambda text: None                          # where waits are reported (library() points it at the sync log)

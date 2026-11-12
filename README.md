@@ -161,11 +161,11 @@ data/
 | `output/` | generated collages |
 | `aliases.json` | other spellings of a title, mapped to the one in your list |
 | `ui.json` | window preferences, poster size and group colors |
-| `spotify_auth.json` | your Spotify sign-in, never part of an export |
+| `spotify_auth.json` | your Spotify sign-in, only part of an export when you include settings |
 | `crash.log` | the traceback of the last crash |
 
-**Settings -> Your data** exports all of it to a single file and imports it back. Your settings (`.env`, API keys included) are left out unless you tick
-**Include settings**, so keep a file made that way private.
+**Settings -> Your data** exports all of it to a single file and imports it back. Your settings (`.env`, API keys included) and Spotify sign-in are left out unless you
+tick **Include settings**, so keep a file made that way private.
 
 ## Project layout
 

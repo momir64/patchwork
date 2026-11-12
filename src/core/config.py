@@ -24,6 +24,7 @@ ENV_PATH = ROOT / ".env"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = DATA_DIR / "output"
 ALIASES_PATH = DATA_DIR / "aliases.json"
+SPOTIFY_AUTH_PATH = DATA_DIR / "spotify_auth.json"                  # the Spotify sign-in (a refresh token)
 KIND_NAMES = ("shows", "movies", "albums", "images")
 
 

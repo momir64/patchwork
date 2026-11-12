@@ -4,17 +4,17 @@
   *.zip   the same patchwork.json plus every poster image (posters/<kind>/<file>)
 
 Importing merges: nothing already in your library is deleted or overwritten (posters only fill gaps unless
-`overwrite_posters` is set). The settings (.env, API keys included) are only exported / imported when asked for (`settings=True`).
+`overwrite_posters` is set). The settings (.env, API keys included) and the Spotify sign-in are only exported / imported when asked for (`settings=True`).
 """
 import json
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .config import KEYS, KIND_NAMES, Config
+from .config import KEYS, KIND_NAMES, SPOTIFY_AUTH_PATH, Config
 from . import covers, editions, singles
 from .groups import Groups
-from .jsonstore import read_json
+from .jsonstore import read_json, write_json
 from .config import ALIASES_PATH
 from .library import Library, add_alias, load_aliases
 from .names import norm_key
@@ -43,6 +43,9 @@ def collect(log=print, settings=False):
             "kinds": kinds, "aliases": aliases}
     if settings:                                                    # the saved settings (.env), API keys included
         data["settings"] = {k: v for k, v in Config().values.items() if k in KEYS}
+        login = read_json(SPOTIFY_AUTH_PATH, {})                    # the Spotify sign-in goes with the settings
+        if login.get("refresh_token"):
+            data["spotify_login"] = login
     return data
 
 
@@ -156,4 +159,9 @@ def import_data(path, overwrite_posters=False, log=print, progress=None, setting
         Config().save(new)
         counts["settings"] = len(new)
         log(f"{len(new)} settings imported")
+    login = data.get("spotify_login") if settings else None
+    if login and login.get("refresh_token") and login.get("client_id"):
+        write_json(SPOTIFY_AUTH_PATH, login)                        # signed in to Spotify on this computer as well
+        counts["spotify_login"] = 1
+        log("Spotify sign-in imported")
     return counts

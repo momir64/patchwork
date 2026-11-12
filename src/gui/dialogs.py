@@ -270,12 +270,12 @@ class SettingsDialog(Modal):
             "Export", "download", "Export...",
             ("Saves your lists, favorites, metadata, groups and name fixes into one file.",
              "Choose .zip to include the poster images, or .json for the data only."),
-            self.export_data, "Include settings", "Adds your settings (.env), API keys included, so keep that file private")
+            self.export_data, "Include settings", "Adds your settings (.env) and your Spotify sign-in, API keys included, so keep that file private")
         self.import_settings = block(
             "Import", "folder", "Import...",
             ("Adds the contents of a file made by Export to your library.",
              "Nothing you already have is deleted or replaced."),
-            self.import_data, "Import settings too", "If the file has settings, they replace your current ones")
+            self.import_data, "Import settings too", "If the file has settings (and a Spotify sign-in), they replace your current ones")
         self.data_msg = label("", "muted", wrap=True)
         v.addWidget(self.data_msg)
         return f
@@ -669,13 +669,16 @@ class SettingsDialog(Modal):
 
         def done(counts):
             self.imported = True
-            applied = counts.pop("settings", 0)
+            applied, login = counts.pop("settings", 0), counts.pop("spotify_login", 0)
             if applied:
                 self.cfg.reload()
                 self.load_fields()                  # the pages show the new values (closing this window saves what they show)
+            if login:
+                spotify_user._access.update(value=None, until=0.0)      # the old access token belongs to the old sign-in
+                self.spotify_account_state()
             text = "Imported: " + ", ".join(f"{k} +{c['added']}" for k, c in counts.items())
             if extra:
-                text += f", {applied} settings" if applied else " (the file has no settings)"
+                text += (f", {applied} settings" + (" and the Spotify sign-in" if login else "")) if applied else " (the file has no settings)"
             return text
         self.run_data_job("Import", lambda progress: transfer.import_data(path, log=lambda m: None, progress=progress, settings=extra), done)
 
