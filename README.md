@@ -76,7 +76,9 @@ sync options, where you can pick the sources, steps and media types.
 
 1. **Sync** to fill the libraries.
 2. **Browse** the pages, star favorites and add items to groups. Right-click for rename, hide and remove.
-3. **Clean up** with the *Resolve duplicates* button on each page.
+3. **Clean up** with the *Resolve duplicates* button on each page. On the Albums page, *Resolve singles* hides
+   singles whose songs are already on an album you have (checked on Spotify or Deezer) and puts them under the
+   **Singles** tab. They come back if the album is removed. You can also mark one by hand from the right-click menu.
 4. Open **Collage**, choose a shape, size and order, then press *Generate collage*. The image is written to
    `data/output`.
 
@@ -137,6 +139,7 @@ data/
     duplicates.json
     cover_colors.json
     cover_hashes.json
+    releases.json
     posters/
   output/
   aliases.json
@@ -150,8 +153,9 @@ data/
 | `library.json` | titles, favorites, and the hidden and removed ones |
 | `meta.json` | per title: genres, countries, languages, creators, year, IDs, plays and your own edits |
 | `groups.json` | your groups and the titles in them, in order |
-| `duplicates.json` | duplicate sets you marked or rejected, and titles hidden as duplicates |
+| `duplicates.json` | duplicate sets you marked or rejected, titles hidden as duplicates, and singles linked to their albums |
 | `cover_colors.json`, `cover_hashes.json` | caches for color sorting and duplicate detection (albums) |
+| `releases.json` | cache of what Spotify / Deezer said about an artist's singles and songs (albums) |
 | `posters/` | one image per title |
 | `output/` | generated collages |
 | `aliases.json` | other spellings of a title, mapped to the one in your list |

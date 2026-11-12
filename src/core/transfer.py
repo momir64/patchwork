@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import KEYS, KIND_NAMES, Config
-from . import covers, editions
+from . import covers, editions, singles
 from .groups import Groups
 from .jsonstore import read_json
 from .config import ALIASES_PATH
@@ -36,6 +36,7 @@ def collect(log=print, settings=False):
             "posters": {l: lib.poster(l).name for l in lib.items if lib.poster(l)},
             "duplicates": editions.export_state(kind),               # which hidden titles are duplicates, "not duplicates" sets...
             "cover_hashes": covers.hashes_of(lib),                   # so the same-cover duplicates are found again at once
+            "releases": singles.load_cache(kind) if kind == "albums" else {},      # what was looked up about singles (Spotify / Deezer)
         }
     aliases = [f"{a} => {b}" for a, b in read_json(ALIASES_PATH, {}).items()]       # exported as "a => b" lines, like before
     data = {"format": FORMAT, "version": VERSION, "exported": datetime.now().isoformat(timespec="seconds"),
@@ -137,6 +138,8 @@ def import_data(path, overwrite_posters=False, log=print, progress=None, setting
         for name, members in block.get("groups", {}).items():
             groups.add(kind, name, [m for m in members if lib.has(m)])
         editions.merge_state(kind, block.get("duplicates", {}), lib)
+        if block.get("releases"):
+            singles.merge_cache(block["releases"], kind)
         lib.save()
         step()
         counts[kind] = {"added": added, "posters": posters, "groups": len(block.get("groups", {}))}

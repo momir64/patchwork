@@ -2,6 +2,7 @@
 without a year or country tag ("Archer" / "Archer (2009)")."""
 import re
 from collections import defaultdict
+from functools import lru_cache
 
 from .config import kind_dir
 from .jsonstore import read_json, write_json
@@ -34,6 +35,7 @@ def is_plain(label: str) -> bool:
     return strip_tags(label) == re.sub(r"\s+", " ", label).strip().casefold()
 
 
+@lru_cache(maxsize=None)                            # asked for the same titles over and over (matching singles, duplicates)
 def base_key(label: str) -> str:
     """One key for every spelling of an album: edition words, EP / Single tags, '&' / 'and', a leading 'The', accents, curly
     quotes, dots and 'Vol. I' / 'Part 1' / 'Pt. One' wording are all ignored."""
@@ -84,7 +86,8 @@ def _dup_state(kind) -> dict:
         d = read_json(f, {})
         _STATE[kind] = (mt, d)
     return {"separate": list(d.get("separate", [])), "hidden": list(d.get("hidden", [])), "manual": list(d.get("manual", [])),
-            "apart": list(d.get("apart", []))}
+            "apart": list(d.get("apart", [])), "singles": {k: list(v) for k, v in d.get("singles", {}).items()},
+            "single_hidden": list(d.get("single_hidden", [])), "not_single": list(d.get("not_single", []))}
 
 
 def separate_ids(kind: str) -> set:
@@ -220,6 +223,13 @@ def merge_state(kind, data, lib):
     d["manual"] += [g for g in data.get("manual", []) if set_id(g) not in have]
     sets = {r["set"] for r in data.get("apart", [])}
     d["apart"] = [r for r in d["apart"] if r["set"] not in sets] + list(data.get("apart", []))
+    for s, albums in data.get("singles", {}).items():               # singles linked to their albums
+        if lib.has(s):
+            mine = {a for t, v in d["singles"].items() if norm_key(t) == norm_key(s) for a in v}
+            d["singles"] = {t: v for t, v in d["singles"].items() if norm_key(t) != norm_key(s)}
+            d["singles"][s] = sorted(mine | {a for a in albums if lib.has(a)}) or sorted(albums)
+    d["single_hidden"] = sorted(set(d["single_hidden"]) | {l for l in data.get("single_hidden", []) if lib.has(l)})
+    d["not_single"] = sorted(set(d["not_single"]) | {l for l in data.get("not_single", []) if lib.has(l)})
     write_json(_dup_file(kind), d)
 
 

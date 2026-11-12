@@ -202,6 +202,54 @@ def round_window_corners(win):
         pass
 
 
+WM_NCCALCSIZE = 0x0083
+
+
+def enable_snapping(win):
+    """Windows: dragging the title bar to a screen edge snaps the window (half, quarter, maximize) only for windows that have a
+    sizing frame and min / max buttons in their style. A frameless window gets those here; the frame itself stays invisible
+    because the client area is made to cover the whole window (see nc_calc_size). Other systems do their own thing."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        get, put = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
+        get.restype, get.argtypes = ctypes.c_ssize_t, (wintypes.HWND, ctypes.c_int)
+        put.restype, put.argtypes = ctypes.c_ssize_t, (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t)
+        hwnd = wintypes.HWND(int(win.winId()))
+        style = get(hwnd, -16)                                              # GWL_STYLE
+        want = style | 0x00040000 | 0x00010000 | 0x00020000                 # WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX
+        if want != style:
+            put(hwnd, -16, want)
+            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)   # no move / size / z-order / activate, frame changed
+    except Exception:
+        pass
+
+
+def nc_calc_size(win, message) -> bool:
+    """WM_NCCALCSIZE for a window made snappable by enable_snapping: the client area is the whole window (no visible frame).
+    Maximized, Windows lays the window out a frame's width beyond the screen, so that part is cut off. True when handled."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        msg = wintypes.MSG.from_address(int(message))
+        if msg.message != WM_NCCALCSIZE or not msg.wParam:
+            return False
+        user32 = ctypes.windll.user32
+        hwnd = wintypes.HWND(msg.hwnd)                                        # (not win.winId(): that would come back in here)
+        if user32.IsZoomed(hwnd):
+            rect = wintypes.RECT.from_address(msg.lParam)                     # first of the proposed rectangles
+            dpi = user32.GetDpiForWindow(hwnd) or 96
+            frame = user32.GetSystemMetricsForDpi(32, dpi) + user32.GetSystemMetricsForDpi(92, dpi)   # SM_CXSIZEFRAME + SM_CXPADDEDBORDER
+            rect.left += frame
+            rect.top += frame
+            rect.right -= frame
+            rect.bottom -= frame
+        return True
+    except Exception:
+        return False
+
+
 class Polisher(QObject):
     """Application-wide touches: menus / dropdown popups get rounded translucent windows, and buttons only take keyboard
     focus once the user starts using the keyboard (so a dialog never opens with a highlighted button)."""

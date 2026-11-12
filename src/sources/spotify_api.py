@@ -63,7 +63,9 @@ def search(cfg, artist, album) -> list:
     return once(_searches, (_norm(artist), _norm(album)), lambda: _search(cfg, artist, album))
 
 
-def _search(cfg, artist, album) -> list:
+def _request(cfg, url, params) -> dict:
+    """One catalog call, spaced out. A short rate limit is waited out; a long one (a ban belongs to the app) raises Limited so
+    the caller moves on to something else."""
     cid = cfg.get("SPOTIFY_CLIENT_ID")
     for attempt in range(3):
         if time.time() < _blocked.get(cid, 0.0):
@@ -73,11 +75,10 @@ def _search(cfg, artist, album) -> list:
             if wait > 0:
                 time.sleep(wait)
             _last[0] = time.time()
-        r = session.get(SEARCH_URL, params={"q": f'album:"{album}" artist:"{artist}"', "type": "album", "limit": 10},
-                        headers={"Authorization": "Bearer " + token(cfg)}, timeout=TIMEOUT)
+        r = session.get(url, params=params, headers={"Authorization": "Bearer " + token(cfg)}, timeout=TIMEOUT)
         if r.status_code == 429:
             pause = int(r.headers.get("Retry-After", "2") or 2)
-            _pace["gap"] = min(2.0, _pace["gap"] * 2)                     # every later search goes slower
+            _pace["gap"] = min(2.0, _pace["gap"] * 2)                     # every later call goes slower
             if pause > 20:                                                 # a long ban: do not sit it out
                 _blocked[cid] = time.time() + pause
                 raise Limited(f"Spotify rate limit reached (retry after {pause} s)")
@@ -86,14 +87,55 @@ def _search(cfg, artist, album) -> list:
                 raise RuntimeError("cancelled")
             continue
         r.raise_for_status()
-        out = []
-        for a in r.json().get("albums", {}).get("items") or []:
-            images = a.get("images") or []
-            out.append({"artists": [x.get("name", "") for x in a.get("artists") or []], "name": a.get("name", ""),
-                        "year": str(a.get("release_date") or "")[:4], "image": images[0]["url"] if images else None})
-        return out
+        return r.json()
     _blocked[cid] = time.time() + 300
     raise Limited("Spotify keeps rate limiting: paused for 5 minutes")
+
+
+def available(cfg) -> bool:
+    """Credentials are set and Spotify is not holding this app back right now."""
+    return cfg.spotify_ready and time.time() >= _blocked.get(cfg.get("SPOTIFY_CLIENT_ID"), 0.0)
+
+
+def _search(cfg, artist, album) -> list:
+    out = []
+    for a in _request(cfg, SEARCH_URL, {"q": f'album:"{album}" artist:"{artist}"', "type": "album", "limit": 10}).get("albums", {}).get("items") or []:
+        images = a.get("images") or []
+        out.append({"artists": [x.get("name", "") for x in a.get("artists") or []], "name": a.get("name", ""),
+                    "year": str(a.get("release_date") or "")[:4], "image": images[0]["url"] if images else None})
+    return out
+
+
+API = "https://api.spotify.com/v1"
+
+
+def find_artist(cfg, name):
+    """Id of the artist with exactly this name (the most popular one when several share it), or None."""
+    items = _request(cfg, SEARCH_URL, {"q": f'artist:"{name}"', "type": "artist", "limit": 10}).get("artists", {}).get("items") or []
+    same = [a for a in items if _norm(a.get("name", "")) == _norm(name)]
+    return max(same, key=lambda a: a.get("popularity", 0))["id"] if same else None
+
+
+def artist_releases(cfg, artist_id) -> list:
+    """[(id, title, album_type, total tracks)] of everything the artist released (albums, singles, compilations)."""
+    out, offset = [], 0
+    while offset < 1000:
+        page = _request(cfg, f"{API}/artists/{artist_id}/albums", {"include_groups": "album,single,compilation", "limit": 50, "offset": offset})
+        out += [(a["id"], a.get("name", ""), a.get("album_type", "album"), a.get("total_tracks", 0)) for a in page.get("items") or []]
+        offset += 50
+        if not page.get("next"):
+            return out
+    return out
+
+
+def album_songs(cfg, ids) -> dict:
+    """{album id: [song titles]}, up to 20 albums per request."""
+    out = {}
+    for i in range(0, len(ids), 20):
+        for a in _request(cfg, f"{API}/albums", {"ids": ",".join(ids[i:i + 20])}).get("albums") or []:
+            if a:
+                out[a["id"]] = [t.get("name", "") for t in (a.get("tracks") or {}).get("items") or []]
+    return out
 
 
 def _matching(cfg, artist, album):

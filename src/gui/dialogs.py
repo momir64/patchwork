@@ -2,19 +2,20 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QLineEdit,
-                               QListWidget, QPlainTextEdit, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
+                               QListWidget, QListWidgetItem, QPlainTextEdit, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from ..core import covers, editions, transfer
+from ..core import covers, editions, singles, transfer
+from ..core.names import norm_key
 from ..core.library import KINDS, Library, add_alias, title_from_label
 from ..sources import Sync
 from ..core.config import ENV_PATH, KEYS
 from ..sources import test_connection
 from ..sources import spotify_user
 from ..sources.sync import KINDS, SOURCES, STEPS, Cancelled
-from . import theme
+from . import icons, theme
 from .chrome import Modal, notify
 from .common import Job
 from .widgets import FlowLayout, UnitSpin, button, label
@@ -1077,6 +1078,340 @@ class DuplicatesDialog(Modal):
                 lib.set_fav(chosen, True)
         editions.save_dup_hidden(kind, rec)
         lib.save()
+        self.accept()
+
+
+class SingleOfDialog(Modal):
+    """Which album(s) of the same artist contain this single / EP. Tick several when its songs are spread over albums.
+    `candidates` are the albums to offer; `chosen` (after exec) are the ticked ones."""
+
+    def __init__(self, lib, titles, candidates, artist, parent=None, preset=()):
+        super().__init__(parent, "Mark as single", 460)
+        self.chosen = []
+        many = len(titles) > 1
+        what = f"These {len(titles)} titles are" if many else f"\"{lib.name(titles[0])}\" is"
+        self.body.addWidget(label(f"{what} a single (or EP) of which album by {artist}?\nTick every album that has its songs. "
+                                  "The single is then hidden as a duplicate while one of them is in your library, and comes back if they are removed.",
+                                  "muted", wrap=True))
+        self.list = QListWidget()
+        self.list.setMinimumHeight(180)
+        for l in candidates:
+            year = lib.meta.get(l).get("year")
+            it = QListWidgetItem(lib.name(l) + (f"   ·   {year}" if year else "") + ("   (hidden)" if lib.is_hidden(l) else ""))
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if l in preset else Qt.CheckState.Unchecked)
+            it.setData(Qt.ItemDataRole.UserRole, l)
+            self.list.addItem(it)
+        self.list.itemChanged.connect(lambda _: self.ok.setEnabled(bool(self.ticked())))
+        self.body.addWidget(self.list, 1)
+        self.ok = self.footer("Mark as single", None, self.done_)
+        self.ok.setEnabled(bool(self.ticked()))
+        self.resize(520, 420)
+
+    def ticked(self):
+        return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def done_(self):
+        self.chosen = self.ticked()
+        self.accept()
+
+
+class Thumb(QWidget):
+    """A small rounded cover."""
+
+    def __init__(self, path, thumbs, size=44):
+        super().__init__()
+        self.path, self.thumbs, self.size = path, thumbs, size
+        self.setFixedSize(size, size)
+        if path:
+            thumbs.loaded.connect(lambda key: self.update() if key == str(path) else None)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        r = QRectF(0, 0, self.size, self.size)
+        shape = QPainterPath()
+        shape.addRoundedRect(r, 7, 7)
+        p.setClipPath(shape)
+        p.fillRect(r, QColor(theme.SURFACE2))
+        pm = self.thumbs.get(self.path) if self.path else None
+        if pm is not None and not pm.isNull():
+            sc = max(r.width() / pm.width(), r.height() / pm.height())
+            w, h = pm.width() * sc, pm.height() * sc
+            p.drawPixmap(QRectF((r.width() - w) / 2, (r.height() - h) / 2, w, h), pm, QRectF(pm.rect()))
+
+
+class SingleTile(QWidget):
+    """One single. Click it to switch between hidden (grayed out, tagged) and kept (as it is)."""
+    changed = Signal()
+    W, LINE = 104, 14
+
+    def __init__(self, text, path, thumbs, tip="", partial=None, hidden=True):
+        super().__init__()
+        self.text, self.path, self.thumbs, self.partial, self.hidden = text, path, thumbs, partial, hidden
+        self.touched, self.hover = False, False
+        self.name_lines = 1
+        self.set_lines(self.lines_needed())
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip((tip + "\n\n" if tip else "") + "Click to " + ("keep it" if hidden else "hide it"))
+        if path:
+            thumbs.loaded.connect(lambda key: self.update() if key == str(path) else None)
+
+    def lines_needed(self):
+        """Lines the name takes under the cover (1 or 2)."""
+        f = QFont()
+        f.setPixelSize(11)
+        return 1 if QFontMetrics(f).horizontalAdvance(self.text) <= self.W - 2 else 2
+
+    def set_lines(self, n):
+        """Room for this many lines of name (the card gives all its covers the same, so there is never a spare line)."""
+        self.name_lines, self.name_h = n, self.LINE * n + 2
+        self.setFixedSize(self.W, self.W + 4 + self.name_h)
+        self.update()
+
+    def set_hidden(self, hidden):
+        self.hidden, self.touched = hidden, True
+        tip = self.toolTip().rsplit("\n\n", 1)[0] if "\n\n" in self.toolTip() else ""
+        self.setToolTip((tip + "\n\n" if tip else "") + "Click to " + ("keep it" if hidden else "hide it"))
+        self.update()
+        self.changed.emit()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.set_hidden(not self.hidden)
+
+    def enterEvent(self, e):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        cover = QRectF(0, 0, self.W, self.W)
+        shape = QPainterPath()
+        shape.addRoundedRect(cover, 9, 9)
+        pm = self.thumbs.get(self.path) if self.path else None
+        p.save()
+        p.setClipPath(shape)
+        p.fillRect(cover, QColor(theme.SURFACE2))
+        p.setOpacity(0.32 if self.hidden else 1.0)                       # a hidden single is grayed out
+        if pm is not None and not pm.isNull():
+            sc = max(cover.width() / pm.width(), cover.height() / pm.height())
+            w, h = pm.width() * sc, pm.height() * sc
+            p.drawPixmap(QRectF((cover.width() - w) / 2, (cover.height() - h) / 2, w, h), pm, QRectF(pm.rect()))
+        p.restore()
+        if self.hover:
+            p.setPen(QPen(QColor(theme.ACCENT_H), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(cover.adjusted(1, 1, -1, -1), 8, 8)
+        f = p.font()
+        f.setPixelSize(10)
+        f.setBold(True)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        text = "Hidden" if self.hidden else "Kept"                       # the tag
+        icon = icons.pixmap("eye-off" if self.hidden else "check", "#ffffff" if not self.hidden else theme.MUTED, 12)
+        tw = fm.horizontalAdvance(text) + 12 + 4 + 12
+        tag = QRectF(self.W - tw - 6, self.W - 24, tw, 18)                  # bottom right
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(8, 10, 14, 225) if self.hidden else QColor(theme.ACCENT))
+        p.drawRoundedRect(tag, 9, 9)
+        p.drawPixmap(int(tag.x() + 6), int(tag.y() + 3), icon)
+        p.setPen(QColor(theme.MUTED if self.hidden else "white"))
+        p.drawText(QRectF(tag.x() + 22, tag.y(), tw - 24, 18), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter), text)
+        if self.partial:                                                  # only some of its songs are on the album
+            w = fm.horizontalAdvance(self.partial) + 12
+            chip = QRectF(5, 5, w, 17)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(8, 10, 14, 225))
+            p.drawRoundedRect(chip, 8.5, 8.5)
+            p.setPen(QColor(theme.TEXT))
+            p.drawText(chip, int(Qt.AlignmentFlag.AlignCenter), self.partial)
+        f.setBold(False)
+        f.setPixelSize(11)
+        p.setFont(f)
+        p.setPen(QColor(theme.MUTED if self.hidden else theme.TEXT))
+        p.drawText(QRectF(1, self.W + 4, self.W - 2, self.name_h), int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop) | int(Qt.TextFlag.TextWordWrap),
+                   QFontMetrics(f).elidedText(self.text, Qt.TextElideMode.ElideRight, (self.W - 2) * self.name_lines - (14 if self.name_lines > 1 else 0)))
+
+
+class AlbumCard(QFrame):
+    """An album (small, on top) with the singles that are on it. The album itself is never touched. The card lays itself out for
+    a given width (place) and says how tall that makes it."""
+    PAD, GAP, HEAD, ALBUM = 10, 8, 72, 72
+    changed = Signal()
+
+    def __init__(self, lib, thumbs, album, entries, hidden):
+        super().__init__()
+        self.tiles = []
+        self.setObjectName("albumcard")
+        self.setStyleSheet(f"QFrame#albumcard {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 12px; }}")
+        self.thumb = Thumb(lib.poster(album), thumbs, self.ALBUM)
+        self.thumb.setParent(self)
+        creators = lib.meta.get(album).get("creators")
+        self.title_text, self.artist_text = lib.name(album), (creators[0] if creators else album.split(" - ", 1)[0])
+        self.title_lbl, self.artist_lbl = label("", "cardtitle"), label("", "muted")
+        for lab in (self.title_lbl, self.artist_lbl):
+            lab.setParent(self)
+            lab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for it in entries:
+            songs = it.get("songs")
+            partial = f"{it['covered']}/{len(songs)}" if songs and it["covered"] < len(songs) else None
+            found = {j for _, idx in it["albums"] for j in idx}
+            tip = it["single"] if not songs else "\n".join([it["single"], ""] + [("✓ " if n in found else "· ") + t for n, t in enumerate(songs[:12])])
+            others = [lib.name(a) for a, _ in it["albums"][1:]]
+            if others:
+                tip += "\n\nAlso on: " + ", ".join(others)
+            tile = SingleTile(lib.name(it["single"]), lib.poster(it["single"]), thumbs, tip, partial, hidden(it))
+            tile.item = it
+            tile.setParent(self)
+            tile.changed.connect(self.changed)
+            self.tiles.append(tile)
+        lines = max(t.lines_needed() for t in self.tiles)
+        for t in self.tiles:
+            t.set_lines(lines)
+
+    def place(self, width) -> int:
+        """Lay the card out for this width; returns its height."""
+        pad, gap, w = self.PAD, self.GAP, SingleTile.W
+        self.thumb.move(pad, pad)
+        text_w = max(40, width - 2 * pad - self.thumb.width() - 12)
+        for lab, text, y in ((self.title_lbl, self.title_text, pad), (self.artist_lbl, self.artist_text, pad + 24)):        # top aligned with the cover
+            shown = QFontMetrics(lab.font()).elidedText(text, Qt.TextElideMode.ElideRight, text_w)
+            lab.setText(shown)
+            lab.setToolTip(text if shown != text else "")                 # a tooltip only where the text is cut off, never for the card's background
+            lab.setGeometry(pad + self.thumb.width() + 12, y, text_w, 22)
+        cols = max(1, (width - 2 * pad + gap) // (w + gap))
+        top = pad + self.HEAD + 14
+        for i, t in enumerate(self.tiles):
+            t.move(pad + (i % cols) * (w + gap), top + (i // cols) * (t.height() + gap))
+        rows = -(-len(self.tiles) // cols)
+        return top + rows * self.tiles[0].height() + (rows - 1) * gap + pad
+
+
+class CardGrid(QWidget):
+    """Cards in rows. A card with more singles is wider (it takes more of the row), so its covers stay in one line and every card is
+    about equally tall: a tall card never pushes the ones next to it or under it. Cards come sorted by number of singles, so
+    similar ones share a row."""
+    GAP, MIN_W = 12, 270
+
+    def __init__(self):
+        super().__init__()
+        self.cards = []
+
+    def add(self, card):
+        card.setParent(self)
+        card.show()
+        self.cards.append(card)
+
+    def resizeEvent(self, e):
+        self.relayout()
+        super().resizeEvent(e)
+
+    def relayout(self):
+        if not self.cards:
+            return
+        w = max(self.width(), 1)
+        n = max(1, (w + self.GAP) // (self.MIN_W + self.GAP))
+        cw = (w - (n - 1) * self.GAP) // n
+        fit = lambda width: max(1, (width - 2 * AlbumCard.PAD + AlbumCard.GAP) // (SingleTile.W + AlbumCard.GAP))     # covers per line
+        rows, row, used = [], [], 0
+        for c in self.cards:
+            span = 1
+            while span < n and fit(span * cw + (span - 1) * self.GAP) < len(c.tiles):
+                span += 1                                      # wide enough for all its covers in one line (as far as the window allows)
+            if row and used + span > n:
+                rows.append(row)
+                row, used = [], 0
+            row.append([c, span])
+            used += span
+        rows.append(row)
+        y = 0
+        for row in rows:
+            spare = n - sum(sp for _, sp in row)
+            row[-1][1] += spare                                # the last card takes what is left of the row
+            x, heights = 0, []
+            for c, sp in row:
+                width = sp * cw + (sp - 1) * self.GAP
+                heights.append(c.place(width))
+            rh = max(heights)
+            for (c, sp), h in zip(row, heights):
+                width = sp * cw + (sp - 1) * self.GAP
+                c.setGeometry(x, y, width, rh)
+                x += width + self.GAP
+            y += rh + self.GAP
+        self.setMinimumHeight(max(0, y - self.GAP))
+
+
+class SinglesDialog(Modal):
+    """Singles that are on an album you already have, grouped by album. They start hidden (grayed out); click one to keep it
+    instead. Hidden ones go to the Singles tab and come back if the album goes; kept ones you clicked are not offered again."""
+
+    def __init__(self, state, parent=None, edit=False, items=None, responsive=False):
+        """`items` are the singles to show (prepared in the background); without them they are worked out here. With `responsive` the
+        window keeps repainting (the loading line moves) while the cards are built."""
+        self.lib = lib = state.libs["albums"]
+        if items is None:
+            items = singles.edit_items(lib) if edit else singles.proposals(lib)
+        self.edit, self.changed, self.tiles = edit, 0, []
+        super().__init__(parent, "Edit singles" if edit else "Singles", 820 if items else 360)
+        if not items:
+            self.body.addWidget(label("No hidden singles." if edit else "No singles to sort out.", "muted", wrap=True))
+            self.footer("Close", None, cancel_text=None)
+            return
+        by = {}
+        for it in items:
+            by.setdefault(it["albums"][0][0], []).append(it)           # under the album that has most of its songs
+        view = CardGrid()
+        order = sorted(by, key=lambda a: (len(by[a]), singles.artist_of(lib, a), a.casefold()))      # fewest singles first: rows match in height
+        for n, album in enumerate(order):
+            card = AlbumCard(lib, state.thumbs, album, sorted(by[album], key=lambda i: i["single"].casefold()),
+                             lambda it: True if edit else singles.should_hide(it))      # weak matches (only a B-side is on the album) start kept
+            card.changed.connect(self.update_status)
+            self.tiles += card.tiles
+            view.add(card)
+            if responsive and n % 4 == 3:
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)      # the loading line keeps moving
+        inner = QWidget()
+        col = QVBoxLayout(inner)
+        col.setContentsMargins(0, 2, 14, 8)
+        col.addWidget(view)
+        col.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(inner)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body.addWidget(scroll, 1)
+        self.status = QLabel("")
+        self.status.setObjectName("muted")
+        self.ok = self.footer("Apply", "check", self.apply, extra=self.status)
+        self.update_status()
+        self.resize(1040, 720)
+
+    def update_status(self):
+        hide = sum(t.hidden for t in self.tiles)
+        self.status.setText(f"{hide} hidden   ·   {len(self.tiles) - hide} kept")
+
+    def apply(self):
+        lib = self.lib
+        hide = [t.item for t in self.tiles if t.hidden and not self.edit]
+        for it in hide:
+            singles.mark_single(lib, it["single"], [a for a, _ in it["albums"]])
+        if hide:
+            hidden, _ = singles.hide(lib, [it["single"] for it in hide])
+            self.changed += hidden
+        keep = [t.item["single"] for t in self.tiles if not t.hidden and (t.touched or self.edit)]
+        if keep:
+            singles.release(lib, keep)
+            self.changed += len(keep)
         self.accept()
 
 

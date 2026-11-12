@@ -9,13 +9,13 @@ from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPa
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QInputDialog, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
 from ..core.config import DATA_DIR, RES, Config
-from ..core import editions
+from ..core import editions, singles
 from ..core.library import KINDS, LIBRARIES, Library
 from ..sources import Sync
 from ..sources.sync import Cancelled
 from . import icons, theme
 from .colorpicker import pick_color
-from .chrome import EdgeResizer, Polisher, TitleBar, ask_text, round_window_corners
+from .chrome import EdgeResizer, Polisher, TitleBar, ask_text, enable_snapping, nc_calc_size, round_window_corners
 from .collage_page import CollagePage
 from .common import Job
 from .dialogs import DEFAULT_SYNC, LogDialog, SettingsDialog, SyncDialog
@@ -121,6 +121,8 @@ class MainWindow(QMainWindow):
         page.data_changed.connect(self.data_changed)
         page.groups_changed.connect(self.rebuild_groups)
         page.log.connect(self.add_log)
+        page.busy.connect(self._line_busy)                # the singles lookup shows on the sidebar's loading line only
+        page.progress.connect(lambda a, b: self.sidebar.set_progress(a, b))       # (the sidebar is built after the pages)
         page.set_status(self.last_status)
         page.cancel_sync.connect(self.cancel_sync)
         page.set_syncing(bool(self.sync_job))
@@ -150,6 +152,7 @@ class MainWindow(QMainWindow):
     def data_changed(self):
         for lib in self.state.libs.values():
             editions.sweep(lib)                       # duplicates hidden earlier come back once they are no longer duplicates
+        singles.sweep(self.state.libs["albums"])      # and singles once their album is gone
         shown = self.page_for.get(self.current_key)
         for p in self.all_media_pages():
             if p is shown:
@@ -355,6 +358,13 @@ class MainWindow(QMainWindow):
             for p in self.all_media_pages():
                 p.set_syncing(on)
 
+    def _line_busy(self, on, text):
+        """A page's background job (not a sync): only the sidebar's running loading line shows it; the Sync button stays as it is."""
+        if on:
+            self.sidebar.set_progress(0, 0)
+        elif not (self.sync_job or self.sidebar.syncing):
+            self.sidebar.progress.hide()
+
     def _data_busy(self, on, text):
         """Exporting / importing your data: the sidebar's loading line runs; there is nothing to cancel."""
         self.sidebar.set_syncing(on or bool(self.sync_job), text=text if on else "Syncing...")
@@ -413,7 +423,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ window behaviour
     def showEvent(self, e):
         super().showEvent(e)
+        enable_snapping(self)                           # dragging the title bar to a screen edge snaps the window (Windows)
         round_window_corners(self)
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG" and nc_calc_size(self, message):
+            return True, 0                              # no visible system frame: the client area is the whole window
+        return super().nativeEvent(event_type, message)
 
     def changeEvent(self, e):
         super().changeEvent(e)

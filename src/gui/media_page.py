@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout
                                QMenu, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedLayout, QStyle, QStyledItemDelegate,
                                QVBoxLayout, QWidget)
 
-from ..core import covers, editions
+from ..core import covers, editions, singles
 from ..core.library import IMG_EXT, title_from_label
 from ..core.names import fold, norm_key, safe_filename, sort_key
 from . import icons, theme
 from .chrome import ask_text, confirm, notify
+from .common import Job
 from .widgets import Btn, FlowLayout, SearchCombo, SearchBox, Segmented, StatusLabel, button, label
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
@@ -394,6 +395,8 @@ class MediaPage(QWidget):
     group_renamed = Signal(str, str, str)
     log = Signal(str)
     cancel_sync = Signal()
+    busy = Signal(bool, str)                                # the singles lookup is running (and what to call it)
+    progress = Signal(int, int)                             # its loading line
 
     def __init__(self, state, kind=None, group=None, lazy=False):
         super().__init__()
@@ -440,6 +443,10 @@ class MediaPage(QWidget):
             self.dup_btn = button("Resolve duplicates", "layers", tip="Find items that exist more than once (editions, with / without a year) and merge them")
             self.dup_btn.clicked.connect(self.merge_duplicates)
             head.addWidget(self.dup_btn)
+        if kind == "albums":
+            self.single_btn = button("Resolve singles", "disc", tip="Find singles that are on an album you already have, and hide them")
+            self.single_btn.clicked.connect(self.resolve_singles)
+            head.addWidget(self.single_btn)
         if kind and self.images:
             add = button("Add images", "plus", tip="Add image files (you can also drop files or folders onto this page)")
             add.clicked.connect(self.add_images_dialog)
@@ -463,6 +470,8 @@ class MediaPage(QWidget):
         tabs = [("All", "all"), ("Favorites", "favs"), ("Selected", "sel"), ("No poster", "nopic"), ("Hidden", "hidden"), ("Duplicates", "dups")]
         if self.images:                                           # every image has its file, and nothing makes duplicates of them
             tabs = [t for t in tabs if t[1] not in ("nopic", "dups")]
+        if self.cat == "albums":
+            tabs.append(("Singles", "singles"))                   # singles hidden because an album of yours has their songs
         self.mode = Segmented(tabs, "all")
         self.mode.set_value(getattr(state, "tab", "all"), emit=False)     # the tab is shared by every page
         self.mode.changed.connect(lambda v: setattr(state, "tab", v))
@@ -618,23 +627,26 @@ class MediaPage(QWidget):
         return box
 
     # ------------------------------------------------------------ source of items
-    def all_items(self, hidden=False, dups=False):
+    def all_items(self, hidden=False, dups=False, single=False):
         """The items of this page. Normally the shown ones; hidden=True gives the ones you hid yourself; dups=True gives
-        the ones the duplicates dialog hid."""
+        the ones the duplicates dialog hid; single=True the ones hidden because they are a single of an album."""
         have = set(self.lib.items)
         names = self.lib.items if self.kind else [l for l in self.state.groups.members(*self.group) if l in have]
         auto = {norm_key(l) for l in editions.load_dup_hidden(self.cat)} if self.lib.hidden else set()   # hidden by the duplicates dialog
+        lone = singles.hidden_keys(self.cat) if (self.cat == "albums" and self.lib.hidden) else set()    # hidden as singles
+        if single:
+            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) in lone]
         if dups:
-            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) in auto]
+            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) in auto and norm_key(l) not in lone]
         if hidden:
-            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) not in auto]
+            return [(self.cat, l) for l in names if self.lib.is_hidden(l) and norm_key(l) not in auto and norm_key(l) not in lone]
         return [(self.cat, l) for l in names if not self.lib.is_hidden(l)]
 
     def reload(self):
         """Re-read everything (after sync, rename, group changes...)."""
         if self.group:
             self.icon_lbl.setPixmap(icons.pixmap("folder", self.state.group_color(self.cat, self.group[1]), 24))
-        self.sel &= set(self.all_items()) | set(self.all_items(hidden=True)) | set(self.all_items(dups=True))     # gone items drop out; filtered / hidden ones stay
+        self.sel &= set(self.all_items()) | set(self.all_items(hidden=True)) | set(self.all_items(dups=True)) | set(self.all_items(single=True))     # gone items drop out; filtered / hidden ones stay
         self.reload_facets()
         self.refresh()
 
@@ -677,7 +689,7 @@ class MediaPage(QWidget):
         if self.kind and self.group_cb.currentData() not in (None, ALL):
             members = set(self.state.groups.members(self.cat, self.group_cb.currentData()))
         out = []
-        for kind, l in self.all_items(hidden=mode == "hidden", dups=mode == "dups"):
+        for kind, l in self.all_items(hidden=mode == "hidden", dups=mode == "dups", single=mode == "singles"):
             if text and not self.matches(l, text):
                 continue
             if mode == "favs" and not self.lib.is_fav(l):
@@ -766,7 +778,7 @@ class MediaPage(QWidget):
 
     def _sync_hidden_sort(self):
         """'Hidden (latest first)' only exists on the tabs that list hidden items."""
-        want = self.mode.value in ("hidden", "dups")
+        want = self.mode.value in ("hidden", "dups", "singles")
         at = self.sort_cb.findData("hidden")
         if want and at < 0:
             ranks = {key: self._sort_rank((text, None, key)) for text, _, key in self.sort_names}   # natural labels give the place
@@ -813,19 +825,23 @@ class MediaPage(QWidget):
     def refresh(self, *_):
         in_dups = self.mode.value == "dups"
         self._sync_hidden_sort()
+        if hasattr(self, "single_btn") and not getattr(self, "_singles_job", None):
+            self.single_btn.setText("Edit singles" if self.mode.value == "singles" else "Resolve singles")
         if hasattr(self, "dup_btn"):
             self.dup_btn.setText("Edit duplicates" if in_dups else "Resolve duplicates")
             self.dup_btn.setToolTip("Change which copy is kept for every duplicate, including the ones already resolved" if in_dups
                                     else "Find items that exist more than once (editions, with / without a year) and merge them")
         items = self.visible()
         self.model.set_items(items)
-        total = len(self.all_items(hidden=self.mode.value == "hidden", dups=self.mode.value == "dups"))
+        total = len(self.all_items(hidden=self.mode.value == "hidden", dups=self.mode.value == "dups", single=self.mode.value == "singles"))
         self.count.setText(f"{len(items)} of {total}" if len(items) != total else f"{total}")
         if not items:
             if self.mode.value == "hidden" and total == 0:
                 self.empty.setText("No hidden items.\nRight-click an item and choose Hide to tuck it away.")
             elif self.mode.value == "dups" and total == 0:
                 self.empty.setText("No hidden duplicates.")
+            elif self.mode.value == "singles" and total == 0:
+                self.empty.setText("No hidden singles.\nResolve singles finds singles that are on an album you already have.")
             elif total == 0 and self.images:
                 self.empty.setText("No images yet.\nUse Add images, or drop image files here." if self.kind else
                                    "No images in this group yet.\nSelect images in Images and choose Add to group, or drop files here.")
@@ -1085,6 +1101,13 @@ class MediaPage(QWidget):
                        lambda: self.set_hidden(labels, not hid))
         if many and not self.images:
             menu.addAction(icons.icon("layers", theme.MUTED, 16), f"Mark {len(items)} as duplicates", lambda: self.mark_duplicates(labels))
+        if self.cat == "albums":
+            known = singles.single_keys("albums") | singles.hidden_keys("albums")
+            if not all(norm_key(l) in known for l in labels):
+                menu.addAction(icons.icon("layers", theme.MUTED, 16), "Mark as single of an album..." + (f" ({len(items)})" if many else ""),
+                               lambda: self.mark_single(labels))
+            if any(norm_key(l) in known for l in labels):
+                menu.addAction(icons.icon("minus-circle", theme.MUTED, 16), "Not a single", lambda: self.unmark_single(labels))
         sub = menu.addMenu(icons.icon("folder", theme.MUTED, 16), "Add to group")
         for name in self.state.groups.names(self.cat):
             sub.addAction(name, lambda n=name: self.add_to_group(items, n))
@@ -1120,6 +1143,118 @@ class MediaPage(QWidget):
         self.model.touch_all()
         self.update_bar()
         self.merge_duplicates()
+
+    def mark_single(self, labels):
+        """The selected titles are singles / EPs of albums you have: pick which album(s) hold their songs. They are then
+        duplicates of those albums (hidden while one is in the library). With no other album of the artist nothing changes."""
+        from .dialogs import SingleOfDialog
+        lib = self.lib
+        if len({covers._artist(lib, l) for l in labels}) > 1:
+            return notify(self, "Mark as single", "Select the singles of one artist at a time.")
+        artist = covers._artist(lib, labels[0])
+        name = (lib.meta.get(labels[0]).get("creators") or [labels[0].split(" - ", 1)[0]])[0]
+        skip = {norm_key(l) for l in labels} | singles.single_keys(self.cat)
+        cands = [l for l in lib.items if norm_key(l) not in skip and covers._artist(lib, l) == artist]
+        if not cands:
+            return notify(self, "Mark as single", f"There is no other album by {name} in your library, so it stays as it is.")
+        cands.sort(key=lambda l: (lib.meta.get(l).get("year") or 9999, l.casefold()))
+        d = SingleOfDialog(lib, labels, cands, name, self, preset=cands if len(cands) == 1 else ())
+        if not d.exec() or not d.chosen:
+            return
+        for l in labels:
+            singles.mark_single(lib, l, d.chosen)
+        hidden, kept = singles.hide(lib, labels)
+        self.sel.clear()
+        self.model.touch_all()
+        self.update_bar()
+        self.log.emit(f"{hidden} marked as single and hidden as duplicate" + (f", {kept} stay visible (their album is hidden, or they belong to a duplicate set)" if kept else ""))
+        self.state.changed.emit()
+        self.data_changed.emit()
+        self.groups_changed.emit()
+
+    # ------------------------------------------------------------ singles that are on an album you have
+    _singles_job = None
+
+    def resolve_singles(self):
+        """Find singles that are on an album you already have: the artists are looked up first (Spotify when it is set up, then
+        Deezer; what was read is kept, so later runs only look up new ones), then the singles are listed for you to confirm.
+        All of it runs in the background (the sidebar's loading line shows it); while it runs this button stops it."""
+        if self._singles_job:
+            self._singles_job.cancel()
+            self.single_btn.setEnabled(False)
+            return
+        edit = self.mode.value == "singles"
+        box = {}
+
+        def work(progress):
+            if not edit and singles.pending(self.lib):                  # artists still to look up
+                from ..sources import releases
+                box["r"] = releases.run(self.lib, self.state.cfg, lambda a, b: None if job.cancelled else progress(a, b),
+                                        lambda: job.cancelled, self.log.emit)
+                if not job.cancelled:
+                    progress(0, 0)                                      # back to the running line: the singles are worked out next
+            if not job.cancelled:
+                box["items"] = singles.edit_items(self.lib) if edit else singles.proposals(self.lib)
+
+        job = self._singles_job = Job(work)
+        self.single_btn.setText("Stop")
+        self.single_btn.setToolTip("Stop (what was looked up so far is kept)")
+        self.busy.emit(True, "")                                        # the running line
+        self.set_status("Preparing singles...")
+
+        def on_progress(a, b):
+            self.progress.emit(a, b)
+            self.set_status(f"Looking up singles  ·  {100 * a // b}%" if b else "Preparing singles...")
+
+        def done():
+            self.busy.emit(False, "")
+            self.set_status("")
+
+        def finished():
+            self._singles_job = None
+            self.single_btn.setEnabled(True)
+            self.single_btn.setText("Edit singles" if self.mode.value == "singles" else "Resolve singles")
+            self.single_btn.setToolTip("Find singles that are on an album you already have, and hide them")
+            r = box.get("r")
+            if r:
+                self.log.emit(f"Singles: {r['looked']} artists looked up" + (f", {r['failed']} failed" if r["failed"] else ""))
+            if box.get("err"):
+                done()
+                notify(self, "Singles", box["err"])
+            elif job.cancelled:
+                done()
+                self.log.emit("Singles lookup stopped")
+            elif box.get("items") is not None and self.isVisible():
+                self.singles_dialog(edit=edit, items=box["items"], ready=done)      # the line keeps running until the dialog is there
+            else:
+                done()
+
+        job.progress.connect(on_progress)
+        job.failed.connect(lambda m: box.update(err=m))
+        job.finished.connect(finished)
+        job.start()
+
+    def singles_dialog(self, edit=False, items=None, ready=None):
+        """Open the singles dialog. It is built in small steps so the loading line keeps moving; `ready` is called once it is built."""
+        from .dialogs import SinglesDialog
+        d = SinglesDialog(self.state, self, edit=edit, items=items, responsive=True)
+        if ready:
+            ready()
+        if d.exec() and d.changed:
+            self.log.emit(f"Singles: {d.changed} change(s)")
+            self.state.changed.emit()
+            self.data_changed.emit()
+            self.groups_changed.emit()
+
+    def unmark_single(self, labels):
+        """No longer a single: the title is shown again (unless you hid it yourself) and is not offered as a single again."""
+        singles.release(self.lib, labels)
+        self.sel.clear()
+        self.model.touch_all()
+        self.update_bar()
+        self.state.changed.emit()
+        self.data_changed.emit()
+        self.groups_changed.emit()
 
     def set_hidden(self, labels, value):
         """Hidden items disappear from every list (except the Hidden filter) and are left out of collages."""
