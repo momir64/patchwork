@@ -54,7 +54,8 @@ def _artist_groups(mbid) -> list:
         data = _get("release-group", artist=mbid, type="album|ep|single", limit=100, offset=offset)
         for g in data.get("release-groups", []):
             date = str(g.get("first-release-date") or "")
-            out.append({"id": g["id"], "title": g["title"], "year": int(date[:4]) if date[:4].isdigit() else None})
+            kind = "compile" if "Compilation" in (g.get("secondary-types") or []) else str(g.get("primary-type") or "album").casefold()
+            out.append({"id": g["id"], "title": g["title"], "year": int(date[:4]) if date[:4].isdigit() else None, "type": kind})
         offset += 100
         if offset >= data.get("release-group-count", 0):
             break
@@ -70,6 +71,19 @@ def artist_years(mbid) -> dict:
             for k in (_key(g["title"]), base_key(g["title"])):
                 out[k] = min(g["year"], out.get(k, g["year"]))
     return out
+
+
+def artist_types(mbid) -> dict:
+    """{title key: release type (album / single / ep / compile)} from the same list as the years: no extra request."""
+    out = {}
+    for g in artist_groups(mbid):
+        for k in (_key(g["title"]), base_key(g["title"])):
+            out.setdefault(k, g.get("type") or "album")
+    return out
+
+
+def type_of(types, album):
+    return types.get(_key(album)) or types.get(base_key(album))
 
 
 def group_for(groups, album):

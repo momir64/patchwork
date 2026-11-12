@@ -20,6 +20,12 @@ from .names import fold, norm_key
 
 KIND = "albums"
 REFRESH_AFTER = 3 * 86400                         # a discography is asked again after this long when an album is not in it
+EP_FROM = 5                                       # Spotify calls an EP a single too: from this many songs it is an EP
+
+
+def spotify_type(album_type, tracks) -> str:
+    """Spotify's album_type (+ number of songs) as our release type: album / single / ep / compile."""
+    return {"compilation": "compile", "single": "single" if (tracks or 0) < EP_FROM else "ep"}.get(album_type, "album")
 
 
 # ---- what you decided ---------------------------------------------------------------------------------------------
@@ -210,10 +216,16 @@ def split(lib, labels, entry):
     return singles, albums, hits
 
 
+def known_without_singles(lib, labels) -> bool:
+    """Sync already saw the release type of every title of this artist and none of them is a single: nothing to look up."""
+    types = [lib.meta.get(l).get("release_type") for l in labels]
+    return all(types) and "single" not in types
+
+
 def needs_lookup(lib, labels, entry) -> bool:
-    """Does Deezer still have to be asked about this artist? (new artist, an album its list lacks, or songs not read yet)"""
+    """Does the artist still have to be looked up? (new artist, an album its list lacks, or songs not read yet)"""
     if entry is None:
-        return True
+        return not known_without_singles(lib, labels)
     if entry.get("id") is None:
         return False
     singles, albums, hits = split(lib, labels, entry)
@@ -226,15 +238,15 @@ def needs_lookup(lib, labels, entry) -> bool:
         any(aid not in tracks for l in albums for aid, k in hits[l][:3])
 
 
-def pending(lib, cache=None) -> list:
-    """[(artist key, name, labels)] still to be looked up."""
+def pending(lib, cache=None, only=None) -> list:
+    """[(artist key, name, labels)] still to be looked up (only these artists when `only` is given)."""
     cache = load_cache(lib.kind) if cache is None else cache
     skip = single_keys(lib.kind) | {norm_key(l) for l in _state(lib.kind)["not_single"]}
     out = []
     for n, (key, labels) in enumerate(artists(lib).items()):
         if n % 25 == 0:
             time.sleep(0.001)                                  # (a pause now and then: the window keeps its loading line moving)
-        if all(norm_key(l) in skip for l in labels):
+        if (only is not None and key not in only) or all(norm_key(l) in skip for l in labels):
             continue
         if needs_lookup(lib, labels, cache.get(key)):
             creators = lib.meta.get(labels[0]).get("creators")

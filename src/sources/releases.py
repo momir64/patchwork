@@ -17,7 +17,6 @@ from .http import TIMEOUT, session
 
 DEEZER = "https://api.deezer.com"
 _lock, _last = threading.Lock(), [0.0]
-EP_FROM = 5                                                   # Spotify calls an EP a single too: from this many songs it is an EP
 
 
 class Quota(Exception):
@@ -31,6 +30,7 @@ def _norm(s):
 class Deezer:
     """No key needed; ~50 requests / 5 s, so the calls are spaced out. Ids look like 'dz:123'."""
     name, prefix = "Deezer", "dz:"
+    editions = 1                                              # songs of the first edition of each album only (one request per album)
 
     def _get(self, path, **params):
         for attempt in range(4):
@@ -72,6 +72,7 @@ class Deezer:
 class Spotify:
     """Your own app's credentials (client credentials: public catalog only). Ids look like 'sp:abc'."""
     name, prefix = "Spotify", "sp:"
+    editions = 3                                              # (albums come 20 per request, so a few editions cost nothing)
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -83,8 +84,7 @@ class Spotify:
     def discography(self, artist_id):
         out = {}
         for aid, title, kind, count in spotify_api.artist_releases(self.cfg, artist_id[len(self.prefix):]):
-            k = {"compilation": "compile", "single": "single" if count < EP_FROM else "ep"}.get(kind, "album")
-            out[self.prefix + aid] = {"t": title, "k": k}
+            out[self.prefix + aid] = {"t": title, "k": singles.spotify_type(kind, count)}
         return out
 
     def songs(self, ids):
@@ -110,14 +110,29 @@ class Sources:
                 self.log(f"{source.name} is not available now ({why})" + ("; using Deezer instead" if self.items else ""))
 
 
+def _seed(lib, labels):
+    """A cache entry built from what sync already saw (Spotify ids and release types of every title of the artist): the artist search
+    and the discography request are not needed. None when something is missing."""
+    ids = [lib.meta.get(l).get("ids", {}) for l in labels]
+    types = [lib.meta.get(l).get("release_type") for l in labels]
+    if not (ids and all(i.get("spotify_album") for i in ids) and all(types) and ids[0].get("spotify_artist")):
+        return None
+    albums = {"sp:" + i["spotify_album"]: {"t": singles.title_of(lib, l), "k": t} for l, i, t in zip(labels, ids, types)}
+    return {"id": "sp:" + ids[0]["spotify_artist"], "src": "sp:", "at": time.time(), "albums": albums, "tracks": {}}
+
+
 def _fill(source, lib, name, labels, entry, cancelled):
     """The artist's cache entry from this source, brought up to date; None when the source does not know the artist."""
     entry = dict(entry) if entry and entry.get("src") == source.prefix and entry.get("id") else {}
     if not entry.get("id"):
-        found = source.find_artist(name)
-        if found is None:
-            return None
-        entry = {"id": found, "src": source.prefix, "at": 0, "albums": {}, "tracks": {}}
+        seeded = _seed(lib, labels) if source.prefix == "sp:" else None
+        if seeded:
+            entry = seeded
+        else:
+            found = source.find_artist(name)
+            if found is None:
+                return None
+            entry = {"id": found, "src": source.prefix, "at": 0, "albums": {}, "tracks": {}}
     stale = len(singles.match(lib, labels, entry)) < len(labels) and time.time() - entry.get("at", 0) > singles.REFRESH_AFTER
     if not entry["albums"] or stale:
         entry["albums"] = source.discography(entry["id"])
@@ -125,7 +140,7 @@ def _fill(source, lib, name, labels, entry, cancelled):
     entry.setdefault("tracks", {})
     only, albums, hits = singles.split(lib, labels, entry)
     if only and not cancelled():                                # songs only matter when there is a single to place
-        want = [hits[s][0][0] for s in only] + [aid for l in albums for aid, k in hits[l][:3]]
+        want = [hits[s][0][0] for s in only] + [aid for l in albums for aid, k in hits[l][:source.editions]]
         entry["tracks"].update(source.songs([a for a in dict.fromkeys(want) if a not in entry["tracks"]]))
     return entry
 
@@ -155,11 +170,11 @@ def lookup(lib, name, labels, entry, sources, cancelled):
     return {"id": None, "src": None, "at": time.time(), "albums": {}, "tracks": {}}      # nobody knows this artist
 
 
-def run(lib, cfg, progress=None, cancelled=lambda: False, log=print, workers=4) -> dict:
+def run(lib, cfg, progress=None, cancelled=lambda: False, log=print, workers=4, only=None) -> dict:
     """Look up every artist that still needs it (several at once; the request spacing is shared). Returns
     {"looked": n, "failed": n, "total": n}. What was read is saved as it goes, so stopping loses nothing."""
     cache = singles.load_cache(lib.kind)
-    todo = singles.pending(lib, cache)
+    todo = singles.pending(lib, cache, only)
     total, looked, failed, errors = len(todo), 0, 0, 0
     if not total:
         return {"looked": 0, "failed": 0, "total": 0}

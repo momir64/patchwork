@@ -69,8 +69,9 @@ To set up the Spotify account:
 API keys and the Spotify sign-in are stored in plain text in `.env` and `data/`.
 
 Press **Sync** in the sidebar. The first run is slow, mostly because album genres, countries and release years come
-from MusicBrainz at about one artist per second. Later syncs only fetch what is new. The button next to it opens the
-sync options, where you can pick the sources, steps and media types.
+from MusicBrainz at about one artist per second. Later syncs only fetch what is new, including a quick singles check
+for the artists of new albums. The button next to it opens the sync options, where you can pick the sources, steps and
+media types.
 
 ## Usage
 

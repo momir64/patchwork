@@ -2,7 +2,7 @@
 (plus small replacements for the stock input / message boxes)."""
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QGuiApplication, QPainterPath, QPixmap, QRegion
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QFrame, QComboBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QToolTip, QVBoxLayout, QWidget)
 
 from ..core.config import RES
@@ -257,6 +257,7 @@ class Polisher(QObject):
     def __init__(self):
         super().__init__()
         self.keys = False
+        self.tip_target = None                            # what the visible tooltip belongs to (see tip_for)
 
     @staticmethod
     def release_combo(combo):
@@ -285,11 +286,39 @@ class Polisher(QObject):
             out.append(line)
         return "\n".join(out)
 
+    @staticmethod
+    def tip_for(global_pos):
+        """What is under the mouse as far as tooltips go: the widget, and for a list / grid the item as well (all items share one widget)."""
+        w = QApplication.widgetAt(global_pos)
+        if w is None:
+            return None
+        view = w.parentWidget()
+        if isinstance(view, QAbstractItemView) and view.viewport() is w:
+            i = view.indexAt(w.mapFromGlobal(global_pos))
+            return (w, i.row(), i.column())
+        return (w,)
+
+    @staticmethod
+    def hide_tip_now():
+        """Close the tooltip at once (QToolTip.hideText only starts a 300 ms delay, and a stuck tip would show for all of it)."""
+        QToolTip.hideText()
+        for w in QApplication.topLevelWidgets():
+            if w.metaObject().className() == "QTipLabel" and w.isVisible():
+                w.close()
+
     def eventFilter(self, obj, ev):
         t = ev.type()
-        if t == QEvent.Type.ToolTip and isinstance(obj, QWidget) and obj.toolTip() and "<" not in obj.toolTip():
-            QToolTip.showText(ev.globalPos(), self.wrap_tip(obj.toolTip()), obj)         # a narrow tooltip instead of one long line
-            return True
+        if t == QEvent.Type.ToolTip and isinstance(obj, QWidget):
+            self.tip_target = self.tip_for(ev.globalPos())
+            if obj.toolTip() and "<" not in obj.toolTip():
+                QToolTip.showText(ev.globalPos(), self.wrap_tip(obj.toolTip()), obj)         # a narrow tooltip instead of one long line
+                return True
+        elif t == QEvent.Type.MouseMove and self.tip_target is not None:
+            if not QToolTip.isVisible():
+                self.tip_target = None
+            elif self.tip_for(ev.globalPosition().toPoint()) != self.tip_target:       # another widget / item is hovered now: the tooltip goes away
+                self.hide_tip_now()                                      # (the next one, if any, shows up on its own)
+                self.tip_target = None
         if t == QEvent.Type.Polish and isinstance(obj, QWidget):
             if isinstance(obj, QMenu) and not obj.property("_rounded"):    # menus: rounded, translucent popup window
                 obj.setProperty("_rounded", True)

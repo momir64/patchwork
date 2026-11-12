@@ -218,16 +218,25 @@ def _pages(cfg, path, on_page=None, cap=None, **params):
         url, params = (data.get("next") if items else None), {}
 
 
+facts = {}                                            # (artist, album) -> what Spotify said about it while library() read it (see _album_key)
+
+
 def _album_key(album):
     artists = album.get("artists") or []
     artist, name = (artists[0].get("name") if artists else "") or "", album.get("name") or ""
-    return (artist.strip(), name.strip()) if artist.strip() and name.strip() else None
+    if not (artist.strip() and name.strip()):
+        return None
+    key = (artist.strip(), name.strip())
+    if album.get("id") and key not in facts:              # every album object read passes here: keep its ids and type (no extra request)
+        facts[key] = {"album": album["id"], "artist": artists[0].get("id"), "type": album.get("album_type"), "tracks": album.get("total_tracks")}
+    return key
 
 
 def library(cfg, liked=True, playlists=True, top=True, log=print, progress=None):
     """-> (saved, liked, playlists, top): the first three in the shape spotify.read gives for the export files,
     saved = {(artist, album): uri}; liked / playlists / top = {(artist, album): {track ids}}."""
     global notice
+    facts.clear()
     saved, lk, pl, tp = {}, {}, {}, {}
     progress = progress or (lambda done, total: None)
     notice = log

@@ -74,9 +74,19 @@ STEP_INFO = {
     "titles": ("Add new items", "Never deletes anything"),
     "posters": ("Download missing posters", "Only items without one"),
     "metadata": ("Fetch missing metadata", "Albums: MusicBrainz, ~1 artist/s"),
+    "singles": ("Check new albums for singles", "Only artists with new albums; hides nothing"),
 }
 KIND_NAMES = {"shows": "Shows", "movies": "Movies", "albums": "Albums"}
-DEFAULT_SYNC = {"sources": list(SOURCES), "steps": list(STEPS), "kinds": list(KINDS), "force_meta": False}
+DEFAULT_SYNC = {"sources": list(SOURCES), "steps": list(STEPS), "kinds": list(KINDS), "force_meta": False, "v": 2}
+
+
+def sync_choice(saved) -> dict:
+    """The saved sync options. A step added later (the singles check) starts switched on once, then it is yours to change."""
+    c = dict(saved)
+    if c.get("v", 1) < 2:
+        c["steps"] = list(c.get("steps", [])) + [s for s in ("singles",) if s not in c.get("steps", [])]
+        c["v"] = 2
+    return c
 
 
 class SyncDialog(Modal):
@@ -143,6 +153,7 @@ class SyncDialog(Modal):
             "steps": [k for k, b in self.boxes["steps"].items() if b.isChecked()],
             "kinds": [k for k, b in self.boxes["kinds"].items() if b.isChecked()],
             "force_meta": self.force.isChecked(),
+            "v": 2,
         }
 
 
@@ -1408,7 +1419,7 @@ class SinglesDialog(Modal):
         if hide:
             hidden, _ = singles.hide(lib, [it["single"] for it in hide])
             self.changed += hidden
-        keep = [t.item["single"] for t in self.tiles if not t.hidden and (t.touched or self.edit)]
+        keep = [t.item["single"] for t in self.tiles if not t.hidden]          # a single you left on Keep is decided too: not offered again
         if keep:
             singles.release(lib, keep)
             self.changed += len(keep)

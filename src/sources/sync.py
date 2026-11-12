@@ -9,7 +9,7 @@ from .http import download_image
 from .trakt import Trakt
 
 SOURCES = ("sonarr", "radarr", "trakt_shows", "trakt_movies", "lastfm", "spotify")
-STEPS = ("titles", "posters", "metadata")
+STEPS = ("titles", "posters", "metadata", "singles")
 KINDS = ("shows", "movies", "albums")
 
 
@@ -38,6 +38,7 @@ class Sync:
         self.aliases = load_aliases()
         self.summary = []
         self.seen = {k: [] for k in libs}   # entries found this run, per kind (carry poster urls / tmdb ids)
+        self.new_albums = []                # albums added by this run (their artists are checked for singles)
         self.kinds = KINDS
         self.force_meta = False
         spotify_api.should_stop = self.cancel.is_set     # Spotify waits (rate limits) end as soon as the sync is cancelled
@@ -97,7 +98,24 @@ class Sync:
         if "metadata" in steps:
             self.stage("Fetching metadata")
             self._fill_metadata()
+        if "singles" in steps and "albums" in self.kinds:
+            self._singles()
         return self.summary
+
+    def _singles(self):
+        """Singles that belong to an album you have, for the artists that got new albums in this sync only (the rest of the library
+        is the Resolve singles button's job, so a sync never turns into a long lookup). Nothing is hidden here: it only prepares the
+        data so Resolve singles opens at once. Spotify ids and release types saved by the steps above save most of the requests."""
+        from ..core import singles
+        lib = self.libs["albums"]
+        only = {singles.artist_of(lib, l) for l in self.new_albums if lib.has(l)}
+        if not only or not singles.pending(lib, None, only):
+            return
+        from . import releases
+        self.stage("Looking up singles")
+        r = releases.run(lib, self.cfg, self.progress, self.cancel.is_set, self.log, only=only)
+        self.summary.append(f"singles: {r['looked']} artists checked")
+        self.log(f"Singles: {len(singles.proposals(lib))} waiting in Resolve singles")
 
     def import_spotify(self, paths, liked=True, playlists=True, min_tracks=3, posters=True, metadata=False):
         """Add albums from Spotify export files, then (optionally) covers and MusicBrainz genres / country."""
@@ -126,6 +144,8 @@ class Sync:
                     lib.rename(old, label)
             if lib.add(label):
                 added += 1
+                if kind == "albums":
+                    self.new_albums.append(label)
                 self.log(f"[{name}] + {label}")
             e.label = lib.canonical(label) or label
             lib.meta.update(e.label, e.meta)
@@ -138,7 +158,7 @@ class Sync:
         cfg = self.cfg
         liked, playlists, top = cfg.flag("SPOTIFY_LIKED"), cfg.flag("SPOTIFY_PLAYLISTS"), cfg.flag("SPOTIFY_TOP")
         saved, lk, pl, tp = spotify_user.library(cfg, liked, playlists, top, self.log, self.progress)
-        return spotify.entries_from(saved, lk, pl, liked, playlists, cfg.integer("SPOTIFY_MIN_SONGS", 3), top=tp)
+        return spotify.entries_from(saved, lk, pl, liked, playlists, cfg.integer("SPOTIFY_MIN_SONGS", 3), top=tp, facts=dict(spotify_user.facts))
 
     def _trakt_entries(self, trakt, kind):
         entries, self._ratings = trakt.collect(kind, self.progress)
@@ -313,12 +333,12 @@ class Sync:
             try:
                 mbid = next((lib.meta.get(l).get("ids", {}).get("artist_mbid") for l in group if lib.meta.get(l).get("ids", {}).get("artist_mbid")), None)
                 mbid = mbid or musicbrainz.find_artist_id(first["creators"][0])
-                return musicbrainz.artist_years(mbid) if mbid else {}
+                return (musicbrainz.artist_years(mbid), musicbrainz.artist_types(mbid)) if mbid else ({}, {})
             except Exception:
-                return None                                  # network trouble
+                return None, None                            # network trouble
 
         missed = []
-        for n, (group, years) in enumerate(self._pool(list(by_artist.values()), work, 1), 1):
+        for n, (group, (years, types)) in enumerate(self._pool(list(by_artist.values()), work, 1), 1):
             for l in group:
                 m = lib.meta.get(l)
                 year = musicbrainz.year_of(years, m.get("title") or l.split(" - ", 1)[-1]) if years else None
@@ -329,6 +349,9 @@ class Sync:
                     missed.append(l)
                     if years is None:
                         self._year_trouble.add(l)
+                kind = musicbrainz.type_of(types, m.get("title") or l.split(" - ", 1)[-1]) if types else None
+                if kind and not m.get("release_type"):                   # the release type comes in the same answer (for singles later)
+                    lib.meta.update(l, {"release_type": kind})
             if n % 20 == 0:
                 lib.meta.save()
                 self.log(f"Release years (MusicBrainz): {n}/{len(by_artist)} artists done")

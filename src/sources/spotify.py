@@ -5,6 +5,7 @@ different songs of them are in your liked songs / playlists, so one-off songs do
 import json
 from pathlib import Path
 
+from ..core import singles
 from .entry import Entry
 
 
@@ -42,8 +43,9 @@ def entries(paths, liked=True, playlists=True, min_tracks=3) -> list:
     return entries_from(*read([Path(p) for p in paths]), liked=liked, playlists=playlists, min_tracks=min_tracks)
 
 
-def entries_from(saved, lk, pl, liked=True, playlists=True, min_tracks=3, top=None) -> list:
-    """The albums to import out of what read() or spotify_user.library() found."""
+def entries_from(saved, lk, pl, liked=True, playlists=True, min_tracks=3, top=None, facts=None) -> list:
+    """The albums to import out of what read() or spotify_user.library() found. `facts` (from the account import) gives each album's
+    Spotify ids and release type, kept so singles can be sorted out later without asking Spotify again."""
     tracks = {}
     for use, src in ((liked, lk), (playlists, pl), (bool(top), top or {})):
         if use:
@@ -55,5 +57,9 @@ def entries_from(saved, lk, pl, liked=True, playlists=True, min_tracks=3, top=No
         meta = dict(title=album, creators=artist, spotify_tracks=len(tracks.get((artist, album), ())))
         if saved.get((artist, album)):
             meta["ids"] = {"spotify": saved[(artist, album)]}
+        f = (facts or {}).get((artist, album))
+        if f:
+            meta["ids"] = {**meta.get("ids", {}), "spotify_album": f["album"], **({"spotify_artist": f["artist"]} if f.get("artist") else {})}
+            meta["release_type"] = singles.spotify_type(f.get("type"), f.get("tracks"))
         out.append(Entry(f"{artist} - {album}", meta, None, album=album))
     return out

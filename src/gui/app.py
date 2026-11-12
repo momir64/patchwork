@@ -18,7 +18,7 @@ from .colorpicker import pick_color
 from .chrome import EdgeResizer, Polisher, TitleBar, ask_text, enable_snapping, nc_calc_size, round_window_corners
 from .collage_page import CollagePage
 from .common import Job
-from .dialogs import DEFAULT_SYNC, LogDialog, SettingsDialog, SyncDialog
+from .dialogs import DEFAULT_SYNC, LogDialog, SettingsDialog, SyncDialog, sync_choice
 from .media_page import MediaPage
 from .sidebar import COLOR_NAMES, FOLDER_COLORS, Sidebar
 from .state import AppState
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         self.sidebar.new_group.connect(self.create_group)
         self.sidebar.group_menu.connect(self.group_context)
         self.sidebar.group_moved.connect(self.move_group)
-        self.sidebar.sync_clicked.connect(lambda: self.start_sync(self.state.pref("sync", DEFAULT_SYNC)))
+        self.sidebar.sync_clicked.connect(lambda: self.start_sync(sync_choice(self.state.pref("sync", DEFAULT_SYNC))))
         self.sidebar.sync_options.connect(self.sync_options)
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.set_wide(self.state.pref("sidebar_width", self.sidebar.WIDE))
@@ -290,7 +290,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ sync
     def sync_options(self):
-        dlg = SyncDialog(self.state.cfg, self.state.pref("sync", DEFAULT_SYNC), self)
+        dlg = SyncDialog(self.state.cfg, sync_choice(self.state.pref("sync", DEFAULT_SYNC)), self)
         dlg.exec()
         if dlg.choice:                                      # Start sync, or closed with X: the options are kept
             self.state.set_pref("sync", dlg.choice)

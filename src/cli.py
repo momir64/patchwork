@@ -13,7 +13,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("sync", help="update lists/posters from Sonarr, Radarr, Trakt, Last.fm")
     s.add_argument("sources", nargs="*", choices=["sonarr", "radarr", "trakt", "lastfm", "spotify"], help="default: all configured")
-    s.add_argument("--only", nargs="+", choices=["titles", "posters", "metadata"], help="run just these steps")
+    s.add_argument("--only", nargs="+", choices=["titles", "posters", "metadata", "singles"], help="run just these steps")
     s.add_argument("--kinds", nargs="+", choices=list(KINDS), help="limit posters/metadata to these media types")
     s.add_argument("--refresh-metadata", action="store_true", help="re-fetch metadata even where it exists")
     l = sub.add_parser("list", help="print a list")
